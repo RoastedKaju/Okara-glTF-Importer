@@ -231,42 +231,21 @@ public:
         // binary chunk is just raw bytes, buffer describes a region, view describes how to interpret it, accessors are attributes
 
         // buffers
-        cJSON *buffers = cJSON_GetObjectItemCaseSensitive(root, "buffers");
-        if (!cJSON_IsArray(buffers))
-        {
-            std::print("GLB does not contain a valid buffers array.\n");
-            cJSON_Delete(root);
-            return false;
-        }
-        if (!iterateOverBuffers(root, buffers))
+        if (!iterateOverBuffers(root))
         {
             cJSON_Delete(root);
             return false;
         }
 
         // buffer views
-        cJSON *buffer_views = cJSON_GetObjectItemCaseSensitive(root, "bufferViews");
-        if (!cJSON_IsArray(buffer_views))
-        {
-            std::print("GLB does not contain a valid buffer views array.\n");
-            cJSON_Delete(root);
-            return false;
-        }
-        if (!iterateOverBufferViews(root, buffer_views))
+        if (!iterateOverBufferViews(root))
         {
             cJSON_Delete(root);
             return false;
         }
 
         // accessors know how to interpert the data where buffer views point
-        cJSON *accessors = cJSON_GetObjectItemCaseSensitive(root, "accessors");
-        if (!cJSON_IsArray(accessors))
-        {
-            std::print("GLB does not contain a valid accessor array.\n");
-            cJSON_Delete(root);
-            return false;
-        }
-        if (!iterateOverAccessors(root, accessors))
+        if (!iterateOverAccessors(root))
         {
             cJSON_Delete(root);
             return false;
@@ -410,6 +389,8 @@ public:
         // reads vertices, indices and fills up the mesh structure
         GLBMesh glbMesh = buildMesh();
 
+        // extract image bytes
+
         return true;
     }
 
@@ -424,8 +405,15 @@ private:
         std::print("Chunk Header Type: {:08X}, Length: {}\n", chunk_header->type, chunk_header->length);
     }
 
-    bool iterateOverBuffers(cJSON *root, cJSON *buffers)
+    bool iterateOverBuffers(cJSON *root)
     {
+        cJSON *buffers = cJSON_GetObjectItemCaseSensitive(root, "buffers");
+        if (!cJSON_IsArray(buffers))
+        {
+            std::print("GLB does not contain a valid buffers array.\n");
+            return false;
+        }
+
         std::print("Buffers: {}\n", cJSON_GetArraySize(buffers));
 
         cJSON *buffer = nullptr;
@@ -444,8 +432,15 @@ private:
         return true;
     }
 
-    bool iterateOverBufferViews(cJSON *root, cJSON *buffer_views)
+    bool iterateOverBufferViews(cJSON *root)
     {
+        cJSON *buffer_views = cJSON_GetObjectItemCaseSensitive(root, "bufferViews");
+        if (!cJSON_IsArray(buffer_views))
+        {
+            std::print("GLB does not contain a valid buffer views array.\n");
+            return false;
+        }
+
         buffer_views_.clear();
         buffer_views_.reserve(cJSON_GetArraySize(buffer_views));
 
@@ -474,8 +469,14 @@ private:
         return true;
     }
 
-    bool iterateOverAccessors(cJSON *root, cJSON *accessors)
+    bool iterateOverAccessors(cJSON *root)
     {
+        cJSON *accessors = cJSON_GetObjectItemCaseSensitive(root, "accessors");
+        if (!cJSON_IsArray(accessors))
+        {
+            std::print("GLB does not contain a valid accessor array.\n");
+            return false;
+        }
         accessors_.clear();
         accessors_.reserve(cJSON_GetArraySize(accessors));
 
@@ -789,6 +790,19 @@ private:
         mesh.material = material_idx_;
 
         return mesh;
+    }
+
+    std::vector<std::byte> extractImageData(size_t index)
+    {
+        assert(index < images_.size());
+
+        const GLBImage &image = images_[index];
+        assert(image.buffer_view >= 0);
+
+        const GLBBufferView &view = buffer_views_[static_cast<std::size_t>(image.buffer_view)];
+        assert(view.byte_offset + view.byte_length <= binary_data_.size());
+
+        
     }
 
     GLBHeader header_{};
