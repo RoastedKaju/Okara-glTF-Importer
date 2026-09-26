@@ -43,11 +43,74 @@ struct GLBAccessor
     std::string type{};
 };
 
+enum class GLBPrimitiveMode
+{
+    points = 0,
+    lines = 1,
+    line_loop = 2,
+    line_strip = 3,
+    triangles = 4,
+    triangle_strip = 5,
+    triangle_fan = 6
+};
+
+struct GLBVec4
+{
+    float x{};
+    float y{};
+    float z{};
+    float w{};
+};
+
 struct GLBVec3
 {
     float x{};
     float y{};
     float z{};
+};
+
+struct GLBVec2
+{
+    float x{};
+    float y{};
+};
+
+struct GLBVertex
+{
+    GLBVec3 position{};
+    GLBVec3 normal{};
+    GLBVec2 uv{};
+    GLBVec4 tangent{};
+};
+
+struct GLBMaterial
+{
+    std::string name{};
+    GLBVec4 base_color_factor{1.0f, 1.0f, 1.0f, 1.0f};
+    float metallic_factor{1.0f};
+    float roughness_factor{1.0f};
+    int base_color_texture{-1};
+};
+
+struct GLBImage
+{
+    std::string name{};
+    std::string uri{};
+    std::string mime_type{};
+    int buffer_view{-1};
+};
+
+struct GLBTexture
+{
+    int source{-1};
+};
+
+struct GLBMesh
+{
+    std::vector<GLBVertex> vertices;
+    std::vector<uint32_t> indices;
+    GLBPrimitiveMode mode{GLBPrimitiveMode::triangles};
+    size_t material{};
 };
 
 class GLBParser
@@ -177,6 +240,7 @@ public:
         }
         if (!iterateOverBuffers(root, buffers))
         {
+            cJSON_Delete(root);
             return false;
         }
 
@@ -190,6 +254,7 @@ public:
         }
         if (!iterateOverBufferViews(root, buffer_views))
         {
+            cJSON_Delete(root);
             return false;
         }
 
@@ -203,6 +268,7 @@ public:
         }
         if (!iterateOverAccessors(root, accessors))
         {
+            cJSON_Delete(root);
             return false;
         }
 
@@ -251,14 +317,65 @@ public:
                     {
                         position_accessor_idx_ = static_cast<size_t>(attribute->valueint);
                     }
+                    // store normal accessor index
+                    else if (std::strcmp(attribute->string, "NORMAL") == 0)
+                    {
+                        normal_accessor_idx_ = static_cast<size_t>(attribute->valueint);
+                    }
+                    // texture coordinates accessor index
+                    else if (std::strcmp(attribute->string, "TEXCOORD_0") == 0)
+                    {
+                        texcoord_accessor_idx_ = static_cast<size_t>(attribute->valueint);
+                    }
+                    // tangent accessor index
+                    else if (std::strcmp(attribute->string, "TANGENT") == 0)
+                    {
+                        tangent_accessor_idx_ = static_cast<size_t>(attribute->valueint);
+                    }
                 }
 
                 cJSON *indices = cJSON_GetObjectItemCaseSensitive(primitive, "indices");
                 if (cJSON_IsNumber(indices))
                 {
                     std::print("Indices accessor: {}\n", indices->valueint);
+                    index_accessor_idx_ = static_cast<size_t>(indices->valueint);
+                }
+
+                cJSON *mode = cJSON_GetObjectItemCaseSensitive(primitive, "mode");
+                if (cJSON_IsNumber(mode))
+                {
+                    std::print("Primitive mode: {}\n", mode->valueint);
+                    primitive_mode_ = static_cast<GLBPrimitiveMode>(mode->valueint);
+                }
+                // this connects a primitive to our materials array
+                cJSON *material = cJSON_GetObjectItemCaseSensitive(primitive, "material");
+                if (cJSON_IsNumber(material))
+                {
+                    std::print("Primitive material index: {}\n", material->valueint);
+                    material_idx_ = static_cast<size_t>(material->valueint);
                 }
             }
+        }
+
+        // parse materials
+        if (!iterateOverMaterials(root))
+        {
+            cJSON_Delete(root);
+            return false;
+        }
+
+        // parse textures
+        if (!iterateOverTextures(root))
+        {
+            cJSON_Delete(root);
+            return false;
+        }
+
+        // inspect images
+        if (!iterateOverImages(root))
+        {
+            cJSON_Delete(root);
+            return false;
         }
 
         // by this point we have all of our meta data
@@ -290,13 +407,8 @@ public:
         }
         std::print("Read {} bytes of binary data.\n", binary_data_.size());
 
-        const auto p0 = readPosition(0);
-        const auto p1 = readPosition(1);
-        const auto p2 = readPosition(2);
-
-        std::print("Position: {}, {}, {}\n", p0.x, p0.y, p0.z);
-        std::print("Position: {}, {}, {}\n", p1.x, p1.y, p1.z);
-        std::print("Position: {}, {}, {}\n", p2.x, p2.y, p2.z);
+        // reads vertices, indices and fills up the mesh structure
+        GLBMesh glbMesh = buildMesh();
 
         return true;
     }
@@ -323,7 +435,6 @@ private:
             if (!cJSON_IsNumber(byte_length))
             {
                 std::print("Buffer is missing 'byteLength'.\n");
-                cJSON_Delete(root);
                 return false;
             }
 
@@ -350,7 +461,6 @@ private:
             if (!cJSON_IsNumber(buffer) || !cJSON_IsNumber(byte_length))
             {
                 std::print("Invalid buffer view.\n");
-                cJSON_Delete(root);
                 return false;
             }
             // offset is an optional field, default value is 0
@@ -383,7 +493,6 @@ private:
             if (!cJSON_IsNumber(component_type) || !cJSON_IsNumber(count) || !cJSON_IsString(type))
             {
                 std::print("Invalid accessor.\n");
-                cJSON_Delete(root);
                 return false;
             }
 
@@ -396,6 +505,139 @@ private:
             accessors_.push_back({view, offset, component_type->valueint, count->valueint, type->valuestring});
         }
 
+        return true;
+    }
+
+    bool iterateOverMaterials(cJSON *root)
+    {
+        cJSON *materials = cJSON_GetObjectItemCaseSensitive(root, "materials");
+        if (!cJSON_IsArray(materials))
+        {
+            std::print("GLB does not contain any valid materials array.\n");
+            return false;
+        }
+
+        std::print("Materials: {}\n", cJSON_GetArraySize(materials));
+        materials_.reserve(cJSON_GetArraySize(materials)); // reserve size for our material array
+
+        cJSON *material = nullptr;
+        cJSON_ArrayForEach(material, materials)
+        {
+            GLBMaterial result{};
+            // name
+            cJSON *name = cJSON_GetObjectItemCaseSensitive(material, "name");
+            if (cJSON_IsString(name))
+            {
+                result.name = name->valuestring;
+            }
+            // pbr, roughness, metallic, base color texture
+            cJSON *pbr = cJSON_GetObjectItemCaseSensitive(material, "pbrMetallicRoughness");
+            if (cJSON_IsObject(pbr))
+            {
+                cJSON *metallic = cJSON_GetObjectItemCaseSensitive(pbr, "metallicFactor");
+                if (cJSON_IsNumber(metallic))
+                {
+                    std::print("Metallic: {}\n", metallic->valuedouble);
+                    result.metallic_factor = static_cast<float>(metallic->valuedouble);
+                }
+                cJSON *roughness = cJSON_GetObjectItemCaseSensitive(pbr, "roughnessFactor");
+                if (cJSON_IsNumber(roughness))
+                {
+                    std::print("Roughness: {}\n", roughness->valuedouble);
+                    result.roughness_factor = static_cast<float>(roughness->valuedouble);
+                }
+                cJSON *base_color_texture = cJSON_GetObjectItemCaseSensitive(pbr, "baseColorTexture");
+                if (cJSON_IsObject(base_color_texture))
+                {
+                    cJSON *index = cJSON_GetObjectItemCaseSensitive(base_color_texture, "index");
+                    if (cJSON_IsNumber(index))
+                    {
+                        std::print("Base color texture index: {}\n", index->valueint);
+                        result.base_color_texture = index->valueint;
+                    }
+                }
+                // TODO: get base color factor
+            }
+
+            materials_.push_back(std::move(result));
+        }
+
+        return true;
+    }
+
+    bool iterateOverTextures(cJSON *root)
+    {
+        cJSON *textures = cJSON_GetObjectItemCaseSensitive(root, "textures");
+        if (!cJSON_IsArray(textures))
+        {
+            std::print("GLB does not contain a valid textures array.\n");
+            return false;
+        }
+
+        std::print("Textures: {}\n", cJSON_GetArraySize(textures));
+        textures_.reserve(cJSON_GetArraySize(textures));
+
+        cJSON *texture = nullptr;
+        cJSON_ArrayForEach(texture, textures)
+        {
+            GLBTexture result{};
+
+            cJSON *source = cJSON_GetObjectItemCaseSensitive(texture, "source");
+            if (cJSON_IsNumber(source))
+            {
+                std::print("Texture source image index: {}\n", source->valueint);
+                result.source = source->valueint;
+            }
+
+            textures_.push_back(std::move(result));
+        }
+
+        return true;
+    }
+
+    bool iterateOverImages(cJSON *root)
+    {
+        cJSON *images = cJSON_GetObjectItemCaseSensitive(root, "images");
+        if (!cJSON_IsArray(images))
+        {
+            std::print("GLB does not contain a valid images array.\n");
+            return false;
+        }
+
+        std::print("Images: {}\n", cJSON_GetArraySize(images));
+        images_.reserve(cJSON_GetArraySize(images));
+
+        cJSON *image = nullptr;
+        cJSON_ArrayForEach(image, images)
+        {
+            GLBImage result{};
+
+            cJSON *name = cJSON_GetObjectItemCaseSensitive(image, "name");
+            if (cJSON_IsString(name))
+            {
+                result.name = name->valuestring;
+            }
+
+            cJSON *uri = cJSON_GetObjectItemCaseSensitive(image, "uri");
+            if (cJSON_IsString(uri))
+            {
+                result.uri = uri->valuestring;
+            }
+
+            cJSON *buffer_view = cJSON_GetObjectItemCaseSensitive(image, "bufferView");
+            if (cJSON_IsNumber(buffer_view))
+            {
+                result.buffer_view = buffer_view->valueint;
+            }
+
+            cJSON *mime_type = cJSON_GetObjectItemCaseSensitive(image, "mimeType");
+            if (cJSON_IsString(mime_type))
+            {
+                result.mime_type = mime_type->valuestring;
+            }
+
+            images_.push_back(std::move(result));
+        }
         return true;
     }
 
@@ -426,26 +668,127 @@ private:
         return 0;
     }
 
-    GLBVec3 readPosition(std::size_t index)
+    size_t calculateOffset(const GLBAccessor &accessor, size_t index)
     {
-        const GLBAccessor &accessor = accessors_[position_accessor_idx_];
         assert(index < accessor.count);
-
         const std::size_t component_size = componentTypeSize(accessor.component_type);
         const std::size_t component_count = componentCount(accessor.type);
         const std::size_t element_size = component_size * component_count;
-        const GLBBufferView &position_view = buffer_views_[accessor.buffer_view];
-        const size_t position_offset = position_view.byte_offset + accessor.byte_offset;
+        const GLBBufferView &view = buffer_views_[accessor.buffer_view];
+        const size_t view_offset = view.byte_offset + accessor.byte_offset;
 
-        const std::size_t offset = position_offset + index * element_size;
+        const size_t stride = view.byte_stride != 0 ? view.byte_stride : element_size;
+        return view_offset + index * stride;
+    }
+
+    GLBVec4 readVec4(const GLBAccessor &accessor, size_t index)
+    {
+        GLBVec4 result{};
+        const size_t offset = calculateOffset(accessor, index);
+        std::memcpy(&result.x, binary_data_.data() + offset + 0, sizeof(float));
+        std::memcpy(&result.y, binary_data_.data() + offset + 4, sizeof(float));
+        std::memcpy(&result.z, binary_data_.data() + offset + 8, sizeof(float));
+        std::memcpy(&result.w, binary_data_.data() + offset + 12, sizeof(float));
+
+        return result;
+    }
+
+    GLBVec3 readVec3(const GLBAccessor &accessor, size_t index)
+    {
 
         GLBVec3 result{};
-
+        const size_t offset = calculateOffset(accessor, index);
         std::memcpy(&result.x, binary_data_.data() + offset + 0, sizeof(float));
         std::memcpy(&result.y, binary_data_.data() + offset + 4, sizeof(float));
         std::memcpy(&result.z, binary_data_.data() + offset + 8, sizeof(float));
 
         return result;
+    }
+
+    GLBVec2 readVec2(const GLBAccessor &accessor, size_t index)
+    {
+        GLBVec2 result{};
+        const size_t offset = calculateOffset(accessor, index);
+        std::memcpy(&result.x, binary_data_.data() + offset + 0, sizeof(float));
+        std::memcpy(&result.y, binary_data_.data() + offset + 4, sizeof(float));
+
+        return result;
+    }
+
+    GLBVec3 readPosition(std::size_t index)
+    {
+        return readVec3(accessors_[position_accessor_idx_], index);
+    }
+
+    GLBVec3 readNormal(std::size_t index)
+    {
+        return readVec3(accessors_[normal_accessor_idx_], index);
+    }
+
+    GLBVec2 readTexcoord(std::size_t index)
+    {
+        return readVec2(accessors_[texcoord_accessor_idx_], index);
+    }
+
+    GLBVec4 readTangent(std::size_t index)
+    {
+        return readVec4(accessors_[tangent_accessor_idx_], index);
+    }
+
+    uint32_t readIndex(std::size_t index)
+    {
+        const GLBAccessor &accessor = accessors_[index_accessor_idx_];
+
+        uint32_t result{};
+        const size_t offset = calculateOffset(accessor, index);
+        std::memcpy(&result, binary_data_.data() + offset, sizeof(uint32_t));
+
+        return result;
+    }
+
+    GLBVertex readVertex(std::size_t index)
+    {
+        GLBVertex result{};
+
+        result.position = readPosition(index);
+        result.normal = readNormal(index);
+        result.uv = readTexcoord(index);
+        result.tangent = readTangent(index);
+
+        return result;
+    }
+
+    std::size_t triangleCount() const
+    {
+        const GLBAccessor &index_accessor = accessors_[index_accessor_idx_];
+        assert(index_accessor.count % 3 == 0);
+        return index_accessor.count / 3;
+    }
+
+    GLBMesh buildMesh()
+    {
+        GLBMesh mesh{};
+
+        const GLBAccessor &position_accessor = accessors_[position_accessor_idx_];
+        mesh.vertices.reserve(position_accessor.count);
+        for (size_t i = 0; i < position_accessor.count; ++i)
+        {
+            mesh.vertices.push_back(readVertex(i));
+        }
+
+        const GLBAccessor &index_accessor = accessors_[index_accessor_idx_];
+        mesh.indices.reserve(index_accessor.count);
+        for (size_t i = 0; i < index_accessor.count; ++i)
+        {
+            mesh.indices.push_back(readIndex(i));
+        }
+        assert(mesh.indices.size() % 3 == 0);
+
+        mesh.mode = primitive_mode_;
+
+        mesh.material = material_idx_;
+
+        return mesh;
     }
 
     GLBHeader header_{};
@@ -454,6 +797,17 @@ private:
     std::vector<GLBAccessor> accessors_;
 
     size_t position_accessor_idx_;
+    size_t normal_accessor_idx_;
+    size_t index_accessor_idx_;
+    size_t texcoord_accessor_idx_;
+    size_t tangent_accessor_idx_;
+
+    GLBPrimitiveMode primitive_mode_;
+    size_t material_idx_;
+
+    std::vector<GLBMaterial> materials_;
+    std::vector<GLBTexture> textures_;
+    std::vector<GLBImage> images_;
 };
 
 int main()
