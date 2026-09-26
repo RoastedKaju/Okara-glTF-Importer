@@ -7,13 +7,13 @@
 #include <cassert>
 #include <cJSON.h>
 
-static constexpr std::uint32_t GLB_MAGIC = 0x46546C67;
-static constexpr std::uint32_t GLB_VERSION = 2;
-static constexpr std::uint32_t JSON_CHUNK = 0x4E4F534A;
-static constexpr std::uint32_t BIN_CHUNK = 0x004E4942;
-
 namespace Okara::GlTF
 {
+    static constexpr std::uint32_t GLB_MAGIC = 0x46546C67;
+    static constexpr std::uint32_t GLB_VERSION = 2;
+    static constexpr std::uint32_t JSON_CHUNK = 0x4E4F534A;
+    static constexpr std::uint32_t BIN_CHUNK = 0x004E4942;
+
     struct Header
     {
         uint32_t magic{};
@@ -671,10 +671,18 @@ namespace Okara::GlTF
         {
             switch (component_type)
             {
+            case 5120: // signed byte
+                return sizeof(uint8_t);
+            case 5121: // unsigned byte
+                return sizeof(uint8_t);
+            case 5122: // signed short
+                return sizeof(uint16_t);
+            case 5123: // unsigned short
+                return sizeof(uint16_t);
+            case 5125: // unsigned int
+                return sizeof(uint32_t);
             case 5126: // float
                 return sizeof(float);
-            case 5125: // unsigned integer
-                return sizeof(uint32_t);
             default:
                 return 0;
             }
@@ -764,12 +772,35 @@ namespace Okara::GlTF
         uint32_t readIndex(std::size_t index)
         {
             const Accessor &accessor = accessors_[index_accessor_idx_];
-
-            uint32_t result{};
             const size_t offset = calculateOffset(accessor, index);
-            std::memcpy(&result, binary_data_.data() + offset, sizeof(uint32_t));
 
-            return result;
+            switch (accessor.component_type)
+            {
+            case 5121: // unsigned byte
+            {
+                uint8_t v{};
+                std::memcpy(&v, binary_data_.data() + offset, sizeof(uint8_t));
+                return v;
+            }
+            case 5123: // unsigned short
+            {
+                uint16_t v{};
+                std::memcpy(&v, binary_data_.data() + offset, sizeof(uint16_t));
+                return v;
+            }
+            case 5125: // unsigned int
+            {
+                uint32_t v{};
+                std::memcpy(&v, binary_data_.data() + offset, sizeof(uint32_t));
+                return v;
+            }
+            default:
+                assert(false && "Unsupported index component type");
+                return 0;
+            }
+
+            assert(false && "Unsupported index component type");
+            return 0;
         }
 
         Vertex readVertex(std::size_t index)
