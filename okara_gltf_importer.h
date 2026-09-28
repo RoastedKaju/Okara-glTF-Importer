@@ -8,7 +8,7 @@
 #include "cJSON.h"
 
 // TODO: implement get failure reason function for this library
-// TODO: make function names start with a a capital letter
+// TODO: add GlTF support
 
 namespace okara::gltf
 {
@@ -64,10 +64,23 @@ namespace okara::gltf
     struct Material
     {
         std::string name{};
-        float base_color_factor[4]{1.0f, 1.0f, 1.0f, 1.0f};
+
+        float base_color_factor[4]{1.0f, 1.0f, 1.0f, 1.0f}; // RGBA
         float metallic_factor{1.0f};
         float roughness_factor{1.0f};
-        int base_color_texture{-1};
+
+        std::int32_t base_color_texture{-1};
+        std::int32_t metallic_roughness_texture{-1};
+        std::int32_t normal_texture{-1};
+        std::int32_t occlusion_texture{-1};
+        std::int32_t emissive_texture{-1};
+
+        float emissive_factor[3]{0.0f, 0.0f, 0.0f};
+
+        // material render flags
+        bool double_sided{false};
+        std::string alpha_mode{"OPAQUE"}; // "OPAQUE", "MASK", or "BLEND"
+        float alpha_cut_off{0.5f};
     };
 
     struct Image
@@ -76,12 +89,23 @@ namespace okara::gltf
         std::string uri{};
         std::string mime_type{};
         std::vector<std::byte> data{};
-        int buffer_view{-1};
+        std::int32_t buffer_view{-1};
+    };
+
+    struct Sampler
+    {
+        std::string name{};
+        int32_t mag_filter{9729}; // default: LINEAR (9729)
+        int32_t min_filter{9987}; // default: LINEAR_MIPMAP_LINEAR (9987)
+        int32_t wrap_s{10497};    // default: REPEAT (10497)
+        int32_t wrap_t{10497};    // default: REPEAT (10497)
     };
 
     struct Texture
     {
-        int source{-1};
+        std::string name{};
+        std::int32_t source{-1};
+        std::int32_t sampler{-1};
     };
 
     enum class PrimitiveRenderMode
@@ -378,6 +402,12 @@ namespace okara::gltf
                 cJSON_Delete(root);
                 return false;
             }
+            // samplers
+            if (!ParseSamplers(root))
+            {
+                cJSON_Delete(root);
+                return false;
+            }
             // images
             if (!ParseImages(root))
             {
@@ -423,12 +453,12 @@ namespace okara::gltf
                 }
             }
 
-            // extract images data
+            // copy images data
             for (Image &image : images_)
             {
                 if (image.buffer_view >= 0)
                 {
-                    ExtractImageData(image);
+                    CopyImageData(image);
                 }
             }
 
@@ -474,6 +504,11 @@ namespace okara::gltf
                 }
                 ++mesh_count;
             }
+
+            std::print("Materials: {}\n", materials_.size());
+            std::print("Textures: {}\n", textures_.size());
+            std::print("Images: {}\n", images_.size());
+
 
             // release the temperory data
             binary_data_.clear();
@@ -617,52 +652,57 @@ namespace okara::gltf
             cJSON *materials = cJSON_GetObjectItemCaseSensitive(root, "materials");
             if (!cJSON_IsArray(materials))
             {
-                std::print("GLB does not contain any valid materials array.\n");
-                return false;
+                // missing materials array is also valid in gltf spec
+                return true;
             }
 
             materials_.clear();
             materials_.reserve(cJSON_GetArraySize(materials));
 
-            std::print("Materials: {}\n", cJSON_GetArraySize(materials));
-            materials_.reserve(cJSON_GetArraySize(materials)); // reserve size for our material array
+            // helper to extract gltf texture index from texture object
+            auto parse_texture_index = [](cJSON *parent, const char *key) -> int32_t
+            {
+                cJSON *tex_obj = cJSON_GetObjectItemCaseSensitive(parent, key);
+                if (cJSON_IsObject(tex_obj))
+                {
+                    cJSON *index = cJSON_GetObjectItemCaseSensitive(tex_obj, "index");
+                    if (cJSON_IsNumber(index))
+                    {
+                        return index->valueint;
+                    }
+                }
+                return -1;
+            };
 
             cJSON *material = nullptr;
             cJSON_ArrayForEach(material, materials)
             {
                 Material result{};
+
                 // name
                 cJSON *name = cJSON_GetObjectItemCaseSensitive(material, "name");
                 if (cJSON_IsString(name))
                 {
                     result.name = name->valuestring;
                 }
-                // pbr, roughness, metallic, base color texture
+                // metallic and roughness
                 cJSON *pbr = cJSON_GetObjectItemCaseSensitive(material, "pbrMetallicRoughness");
                 if (cJSON_IsObject(pbr))
                 {
                     cJSON *metallic = cJSON_GetObjectItemCaseSensitive(pbr, "metallicFactor");
                     if (cJSON_IsNumber(metallic))
                     {
-                        std::print("Metallic: {}\n", metallic->valuedouble);
                         result.metallic_factor = static_cast<float>(metallic->valuedouble);
                     }
                     cJSON *roughness = cJSON_GetObjectItemCaseSensitive(pbr, "roughnessFactor");
                     if (cJSON_IsNumber(roughness))
                     {
-                        std::print("Roughness: {}\n", roughness->valuedouble);
                         result.roughness_factor = static_cast<float>(roughness->valuedouble);
                     }
-                    cJSON *base_color_texture = cJSON_GetObjectItemCaseSensitive(pbr, "baseColorTexture");
-                    if (cJSON_IsObject(base_color_texture))
-                    {
-                        cJSON *index = cJSON_GetObjectItemCaseSensitive(base_color_texture, "index");
-                        if (cJSON_IsNumber(index))
-                        {
-                            std::print("Base color texture index: {}\n", index->valueint);
-                            result.base_color_texture = index->valueint;
-                        }
-                    }
+
+                    result.base_color_texture = parse_texture_index(pbr, "baseColorTexture");
+                    result.metallic_roughness_texture = parse_texture_index(pbr, "metallicRoughnessTexture");
+
                     cJSON *base_color_factor = cJSON_GetObjectItemCaseSensitive(pbr, "baseColorFactor");
                     if (cJSON_IsArray(base_color_factor) && cJSON_GetArraySize(base_color_factor) == 4)
                     {
@@ -670,7 +710,7 @@ namespace okara::gltf
                         cJSON *g = cJSON_GetArrayItem(base_color_factor, 1);
                         cJSON *b = cJSON_GetArrayItem(base_color_factor, 2);
                         cJSON *a = cJSON_GetArrayItem(base_color_factor, 3);
-                        // validate that all the data inside color factor is not malformed
+
                         if (cJSON_IsNumber(r) && cJSON_IsNumber(g) && cJSON_IsNumber(b) && cJSON_IsNumber(a))
                         {
                             result.base_color_factor[0] = static_cast<float>(r->valuedouble);
@@ -681,9 +721,46 @@ namespace okara::gltf
                     }
                 }
 
+                // additional material textures
+                result.normal_texture = parse_texture_index(material, "normalTexture");
+                result.occlusion_texture = parse_texture_index(material, "occlusionTexture");
+                result.emissive_texture = parse_texture_index(material, "emissiveTexture");
+
+                // emissive factor
+                cJSON *emissive_factor = cJSON_GetObjectItemCaseSensitive(material, "emissiveFactor");
+                if (cJSON_IsArray(emissive_factor) && cJSON_GetArraySize(emissive_factor) == 3)
+                {
+                    cJSON *r = cJSON_GetArrayItem(emissive_factor, 0);
+                    cJSON *g = cJSON_GetArrayItem(emissive_factor, 1);
+                    cJSON *b = cJSON_GetArrayItem(emissive_factor, 2);
+
+                    if (cJSON_IsNumber(r) && cJSON_IsNumber(g) && cJSON_IsNumber(b))
+                    {
+                        result.emissive_factor[0] = static_cast<float>(r->valuedouble);
+                        result.emissive_factor[1] = static_cast<float>(g->valuedouble);
+                        result.emissive_factor[2] = static_cast<float>(b->valuedouble);
+                    }
+                }
+
+                // render flags
+                cJSON *double_sided = cJSON_GetObjectItemCaseSensitive(material, "doubleSided");
+                if (cJSON_IsBool(double_sided))
+                {
+                    result.double_sided = cJSON_IsTrue(double_sided);
+                }
+                cJSON *alpha_mode = cJSON_GetObjectItemCaseSensitive(material, "alphaMode");
+                if (cJSON_IsString(alpha_mode))
+                {
+                    result.alpha_mode = alpha_mode->valuestring;
+                }
+                cJSON *alpha_cutoff = cJSON_GetObjectItemCaseSensitive(material, "alphaCutoff");
+                if (cJSON_IsNumber(alpha_cutoff))
+                {
+                    result.alpha_cut_off = static_cast<float>(alpha_cutoff->valuedouble);
+                }
+
                 materials_.push_back(std::move(result));
             }
-
             return true;
         }
 
@@ -695,11 +772,10 @@ namespace okara::gltf
             cJSON *textures = cJSON_GetObjectItemCaseSensitive(root, "textures");
             if (!cJSON_IsArray(textures))
             {
-                std::print("GLB does not contain a valid textures array.\n");
-                return false;
+                // Missing textures array is valid gltf
+                return true;
             }
 
-            std::print("Textures: {}\n", cJSON_GetArraySize(textures));
             textures_.clear();
             textures_.reserve(cJSON_GetArraySize(textures));
 
@@ -708,14 +784,61 @@ namespace okara::gltf
             {
                 Texture result{};
 
+                cJSON *name = cJSON_GetObjectItemCaseSensitive(texture, "name");
+                if (cJSON_IsString(name))
+                {
+                    result.name = name->valuestring;
+                }
                 cJSON *source = cJSON_GetObjectItemCaseSensitive(texture, "source");
                 if (cJSON_IsNumber(source))
                 {
-                    std::print("Texture source image index: {}\n", source->valueint);
                     result.source = source->valueint;
+                }
+                cJSON *sampler = cJSON_GetObjectItemCaseSensitive(texture, "sampler");
+                if (cJSON_IsNumber(sampler))
+                {
+                    result.sampler = sampler->valueint;
                 }
 
                 textures_.push_back(std::move(result));
+            }
+
+            return true;
+        }
+
+        bool ParseSamplers(cJSON *root)
+        {
+            cJSON *samplers = cJSON_GetObjectItemCaseSensitive(root, "samplers");
+            if (!cJSON_IsArray(samplers))
+            {
+                return true;
+            }
+
+            samplers_.clear();
+            samplers_.reserve(cJSON_GetArraySize(samplers));
+
+            cJSON *sampler = nullptr;
+            cJSON_ArrayForEach(sampler, samplers)
+            {
+                Sampler result{};
+
+                cJSON *mag = cJSON_GetObjectItemCaseSensitive(sampler, "magFilter");
+                if (cJSON_IsNumber(mag))
+                    result.mag_filter = mag->valueint;
+
+                cJSON *min = cJSON_GetObjectItemCaseSensitive(sampler, "minFilter");
+                if (cJSON_IsNumber(min))
+                    result.min_filter = min->valueint;
+
+                cJSON *wrap_s = cJSON_GetObjectItemCaseSensitive(sampler, "wrapS");
+                if (cJSON_IsNumber(wrap_s))
+                    result.wrap_s = wrap_s->valueint;
+
+                cJSON *wrap_t = cJSON_GetObjectItemCaseSensitive(sampler, "wrapT");
+                if (cJSON_IsNumber(wrap_t))
+                    result.wrap_t = wrap_t->valueint;
+
+                samplers_.push_back(result);
             }
 
             return true;
@@ -729,11 +852,9 @@ namespace okara::gltf
             cJSON *images = cJSON_GetObjectItemCaseSensitive(root, "images");
             if (!cJSON_IsArray(images))
             {
-                std::print("GLB does not contain a valid images array.\n");
-                return false;
+                return true;
             }
 
-            std::print("Images: {}\n", cJSON_GetArraySize(images));
             images_.clear();
             images_.reserve(cJSON_GetArraySize(images));
 
@@ -1047,14 +1168,23 @@ namespace okara::gltf
 
         /// @brief Using the buffer view index read the region of bytes where our image data is stored.
         /// @param image Struct containing buffer view index.
-        void ExtractImageData(Image &image)
+        void CopyImageData(Image &image)
         {
-            assert(image.buffer_view >= 0);
+            // skip if image is sourced externally (URI) or has no buffer view assigned
+            if (image.buffer_view < 0)
+            {
+                return;
+            }
 
-            const BufferView &view = buffer_views_[static_cast<std::size_t>(image.buffer_view)];
-            assert(view.byte_offset + view.byte_length <= binary_data_.size());
+            const std::size_t view_idx = static_cast<std::size_t>(image.buffer_view);
+            assert(view_idx < buffer_views_.size() && "Invalid bufferView index for image");
 
-            image.data.assign(binary_data_.begin() + view.byte_offset, binary_data_.begin() + view.byte_offset + view.byte_length);
+            const BufferView &view = buffer_views_[view_idx];
+            assert(view.byte_offset + view.byte_length <= binary_data_.size() && "BufferView out of binary bounds");
+
+            // copy raw compressed image bytes from GLB binary chunk
+            image.data.resize(view.byte_length);
+            std::memcpy(image.data.data(), binary_data_.data() + view.byte_offset, view.byte_length);
         }
 
         void TraverseNode(int index)
@@ -1081,5 +1211,6 @@ namespace okara::gltf
         std::vector<Material> materials_;
         std::vector<Texture> textures_;
         std::vector<Image> images_;
+        std::vector<Sampler> samplers_;
     };
 }
