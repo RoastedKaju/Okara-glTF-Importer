@@ -131,10 +131,27 @@ namespace okara::gltf
         std::vector<Primitive> primitives;
     };
 
+    struct Node
+    {
+        std::vector<int> children;
+
+        Vec4 rotation{0.0f, 0.0f, 0.0f, 1.0f};
+        Vec3 translation{0.0f, 0.0f, 0.0f};
+        Vec3 scale{1.0f, 1.0f, 1.0f};
+
+        int mesh{-1};
+    };
+
+    struct Scene
+    {
+        std::string name;
+        std::vector<int> nodes;
+    };
+
     class Loader
     {
     public:
-        bool load(const std::string &path)
+        bool LoadScene(const std::string &path)
         {
             std::ifstream file(path, std::ios::binary);
             if (!file.is_open())
@@ -176,7 +193,8 @@ namespace okara::gltf
             // return the position back to 12 bytes
             file.seekg(sizeof(Header), std::ios::beg);
 
-            printHeaderData();
+            // print header data
+            std::print("Magic: 0x{:08X}, Version: {}, Length: {}\n", header_.magic, header_.version, header_.length);
 
             // TODO: length variable in header is only 4 bytes but stream position is 64 bits
             if (header_.length != file_size)
@@ -211,7 +229,8 @@ namespace okara::gltf
                 std::print("First GLB chunk is not a JSON chunk.\n");
                 return false;
             }
-            printChunkHeaderData(&chunk_header);
+            // print chunk header data
+            std::print("Chunk Header Type: {:08X}, Length: {}\n", chunk_header.type, chunk_header.length);
 
             cJSON *root = cJSON_ParseWithLength(json_data.data(), json_data.size());
             if (!root)
@@ -248,21 +267,21 @@ namespace okara::gltf
             // binary chunk is just raw bytes, buffer describes a region, view describes how to interpret it, accessors are attributes
 
             // buffers
-            if (!iterateOverBuffers(root))
+            if (!ParseBuffers(root))
             {
                 cJSON_Delete(root);
                 return false;
             }
 
             // buffer views
-            if (!iterateOverBufferViews(root))
+            if (!ParseBufferViews(root))
             {
                 cJSON_Delete(root);
                 return false;
             }
 
             // accessors know how to interpert the data where buffer views point
-            if (!iterateOverAccessors(root))
+            if (!ParseAccessors(root))
             {
                 cJSON_Delete(root);
                 return false;
@@ -357,22 +376,33 @@ namespace okara::gltf
                 meshes_.push_back(std::move(mesh_result));
             }
 
-            // parse materials
-            if (!iterateOverMaterials(root))
+            // nodes
+            if (!ParseNodes(root))
+            {
+                cJSON_Delete(root);
+                return false;
+            }
+            // scenes
+            if (!ParseScenes(root))
             {
                 cJSON_Delete(root);
                 return false;
             }
 
-            // parse textures
-            if (!iterateOverTextures(root))
+            // materials
+            if (!ParseMaterials(root))
             {
                 cJSON_Delete(root);
                 return false;
             }
-
-            // inspect images
-            if (!iterateOverImages(root))
+            // textures
+            if (!ParseTextures(root))
+            {
+                cJSON_Delete(root);
+                return false;
+            }
+            // images
+            if (!ParseImages(root))
             {
                 cJSON_Delete(root);
                 return false;
@@ -412,7 +442,7 @@ namespace okara::gltf
             {
                 for (Primitive &p : m.primitives)
                 {
-                    populatePrimitiveData(p);
+                    PopulatePrimitiveData(p);
                 }
             }
 
@@ -421,11 +451,36 @@ namespace okara::gltf
             {
                 if (image.buffer_view >= 0)
                 {
-                    extractImageData(image);
+                    ExtractImageData(image);
                 }
             }
 
             // NOTE: print the mesh data
+            std::print("Default scene: {}\n", default_scene_);
+            for (std::size_t i = 0; i < scenes_.size(); ++i)
+            {
+                const Scene &scene = scenes_[i];
+                std::print("Scene: {} -> {}\n", i, scene.name);
+                for (int node : scene.nodes)
+                {
+                    std::print("\tRoot node: {}\n", node);
+                }
+            }
+            TraverseNode(scenes_[default_scene_].nodes[0]);
+
+            std::print("Nodes: {}\n", nodes_.size());
+            for (std::size_t i = 0; i < nodes_.size(); ++i)
+            {
+                std::print("\tNode: {} -> Mesh {}\n", i, nodes_[i].mesh);
+                std::print("\t\tTranslation: ({}, {}, {})\n", nodes_[i].translation.x, nodes_[i].translation.y, nodes_[i].translation.z);
+                std::print("\t\tRotation: ({}, {}, {})\n", nodes_[i].rotation.x, nodes_[i].rotation.y, nodes_[i].rotation.z, nodes_[i].rotation.w);
+                std::print("\t\tScale: ({}, {}, {})\n", nodes_[i].scale.x, nodes_[i].scale.y, nodes_[i].scale.z);
+
+                for (int child : nodes_[i].children)
+                {
+                    std::print("\t\tChild: {}\n", child);
+                }
+            }
             std::print("Meshes: {}\n", meshes_.size());
             size_t mesh_count = 0;
             for (const Mesh &m : meshes_)
@@ -443,17 +498,6 @@ namespace okara::gltf
                 ++mesh_count;
             }
 
-            // const Material &material = materials_[meshes_[0].primitives[0].material];
-            // if (material.base_color_texture >= 0)
-            // {
-            //     const Texture &texture = textures_[static_cast<std::size_t>(material.base_color_texture)];
-            //     const Image &image = images_[static_cast<std::size_t>(texture.source)];
-
-            //     std::print("Mesh material: {}\n", material.name);
-            //     std::print("Texture image MIME: {}\n", image.mime_type);
-            //     std::print("Texture image size: {} bytes\n", image.data.size());
-            // }
-
             // release the temperory data
             binary_data_.clear();
             binary_data_.shrink_to_fit();
@@ -462,17 +506,10 @@ namespace okara::gltf
         }
 
     private:
-        void printHeaderData()
-        {
-            std::print("Magic: 0x{:08X}, Version: {}, Length: {}\n", header_.magic, header_.version, header_.length);
-        }
-
-        void printChunkHeaderData(ChunkHeader *chunk_header)
-        {
-            std::print("Chunk Header Type: {:08X}, Length: {}\n", chunk_header->type, chunk_header->length);
-        }
-
-        bool iterateOverBuffers(cJSON *root)
+        /// @brief Iterates over buffers array, each buffer is region.
+        /// @param root JSON object.
+        /// @return True if successful.
+        bool ParseBuffers(cJSON *root)
         {
             cJSON *buffers = cJSON_GetObjectItemCaseSensitive(root, "buffers");
             if (!cJSON_IsArray(buffers))
@@ -499,7 +536,10 @@ namespace okara::gltf
             return true;
         }
 
-        bool iterateOverBufferViews(cJSON *root)
+        /// @brief Buffer views describes how to interpret the data inside a buffer region.
+        /// @param root JSON object.
+        /// @return True if successful.
+        bool ParseBufferViews(cJSON *root)
         {
             cJSON *buffer_views = cJSON_GetObjectItemCaseSensitive(root, "bufferViews");
             if (!cJSON_IsArray(buffer_views))
@@ -536,7 +576,10 @@ namespace okara::gltf
             return true;
         }
 
-        bool iterateOverAccessors(cJSON *root)
+        /// @brief Accessors define how the data is laid out where the buffer view points.
+        /// @param root JSON object.
+        /// @return True if successful.
+        bool ParseAccessors(cJSON *root)
         {
             cJSON *accessors = cJSON_GetObjectItemCaseSensitive(root, "accessors");
             if (!cJSON_IsArray(accessors))
@@ -576,7 +619,10 @@ namespace okara::gltf
             return true;
         }
 
-        bool iterateOverMaterials(cJSON *root)
+        /// @brief Materials define the properties of a surface, things like metallic, roughness and index to textures.
+        /// @param root JSON object.
+        /// @return True if successful.
+        bool ParseMaterials(cJSON *root)
         {
             cJSON *materials = cJSON_GetObjectItemCaseSensitive(root, "materials");
             if (!cJSON_IsArray(materials))
@@ -584,6 +630,9 @@ namespace okara::gltf
                 std::print("GLB does not contain any valid materials array.\n");
                 return false;
             }
+
+            materials_.clear();
+            materials_.reserve(cJSON_GetArraySize(materials));
 
             std::print("Materials: {}\n", cJSON_GetArraySize(materials));
             materials_.reserve(cJSON_GetArraySize(materials)); // reserve size for our material array
@@ -624,7 +673,22 @@ namespace okara::gltf
                             result.base_color_texture = index->valueint;
                         }
                     }
-                    // TODO: get base color factor
+                    cJSON *base_color_factor = cJSON_GetObjectItemCaseSensitive(pbr, "baseColorFactor");
+                    if (cJSON_IsArray(base_color_factor) && cJSON_GetArraySize(base_color_factor) == 4)
+                    {
+                        cJSON *r = cJSON_GetArrayItem(base_color_factor, 0);
+                        cJSON *g = cJSON_GetArrayItem(base_color_factor, 1);
+                        cJSON *b = cJSON_GetArrayItem(base_color_factor, 2);
+                        cJSON *a = cJSON_GetArrayItem(base_color_factor, 3);
+                        // validate that all the data inside color factor is not malformed
+                        if (cJSON_IsNumber(r) && cJSON_IsNumber(g) && cJSON_IsNumber(b) && cJSON_IsNumber(a))
+                        {
+                            result.base_color_factor.x = static_cast<float>(r->valuedouble);
+                            result.base_color_factor.y = static_cast<float>(g->valuedouble);
+                            result.base_color_factor.z = static_cast<float>(b->valuedouble);
+                            result.base_color_factor.w = static_cast<float>(a->valuedouble);
+                        }
+                    }
                 }
 
                 materials_.push_back(std::move(result));
@@ -633,7 +697,10 @@ namespace okara::gltf
             return true;
         }
 
-        bool iterateOverTextures(cJSON *root)
+        /// @brief Texture is an index to a source image.
+        /// @param root JSON object.
+        /// @return True on successful.
+        bool ParseTextures(cJSON *root)
         {
             cJSON *textures = cJSON_GetObjectItemCaseSensitive(root, "textures");
             if (!cJSON_IsArray(textures))
@@ -643,6 +710,7 @@ namespace okara::gltf
             }
 
             std::print("Textures: {}\n", cJSON_GetArraySize(textures));
+            textures_.clear();
             textures_.reserve(cJSON_GetArraySize(textures));
 
             cJSON *texture = nullptr;
@@ -663,7 +731,10 @@ namespace okara::gltf
             return true;
         }
 
-        bool iterateOverImages(cJSON *root)
+        /// @brief Loops over source images, which points to buffer view holding image data and extracts meta-data.
+        /// @param root JSON object.
+        /// @return True if successful.
+        bool ParseImages(cJSON *root)
         {
             cJSON *images = cJSON_GetObjectItemCaseSensitive(root, "images");
             if (!cJSON_IsArray(images))
@@ -673,6 +744,7 @@ namespace okara::gltf
             }
 
             std::print("Images: {}\n", cJSON_GetArraySize(images));
+            images_.clear();
             images_.reserve(cJSON_GetArraySize(images));
 
             cJSON *image = nullptr;
@@ -705,6 +777,117 @@ namespace okara::gltf
                 }
 
                 images_.push_back(std::move(result));
+            }
+            return true;
+        }
+
+        bool ParseNodes(cJSON *root)
+        {
+            cJSON *nodes = cJSON_GetObjectItemCaseSensitive(root, "nodes");
+            if (!cJSON_IsArray(nodes))
+            {
+                std::print("GLB does not contain a valid nodes array.\n");
+                // a GLB can have no nodes, so we return true nevertheless.
+                return true;
+            }
+            std::print("Nodes: {}\n", cJSON_GetArraySize(nodes));
+            nodes_.clear();
+            nodes_.reserve(cJSON_GetArraySize(nodes));
+
+            cJSON *node = nullptr;
+            cJSON_ArrayForEach(node, nodes)
+            {
+                Node result{};
+
+                // mesh reference
+                cJSON *mesh = cJSON_GetObjectItemCaseSensitive(node, "mesh");
+                if (cJSON_IsNumber(mesh))
+                {
+                    result.mesh = mesh->valueint;
+                }
+                // children index
+                cJSON *children = cJSON_GetObjectItemCaseSensitive(node, "children");
+                if (cJSON_IsArray(children))
+                {
+                    cJSON *child = nullptr;
+                    cJSON_ArrayForEach(child, children)
+                    {
+                        if (cJSON_IsNumber(child))
+                        {
+                            result.children.push_back(child->valueint);
+                        }
+                    }
+                }
+                // translation
+                cJSON *translation = cJSON_GetObjectItemCaseSensitive(node, "translation");
+                if (cJSON_IsArray(translation) && cJSON_GetArraySize(translation) == 3)
+                {
+                    result.translation.x = static_cast<float>(cJSON_GetArrayItem(translation, 0)->valuedouble);
+                    result.translation.y = static_cast<float>(cJSON_GetArrayItem(translation, 1)->valuedouble);
+                    result.translation.z = static_cast<float>(cJSON_GetArrayItem(translation, 2)->valuedouble);
+                }
+                // rotation
+                cJSON *rotation = cJSON_GetObjectItemCaseSensitive(node, "rotation");
+                if (cJSON_IsArray(rotation) && cJSON_GetArraySize(rotation) == 4)
+                {
+                    result.rotation.x = static_cast<float>(cJSON_GetArrayItem(rotation, 0)->valuedouble);
+                    result.rotation.y = static_cast<float>(cJSON_GetArrayItem(rotation, 1)->valuedouble);
+                    result.rotation.z = static_cast<float>(cJSON_GetArrayItem(rotation, 2)->valuedouble);
+                    result.rotation.w = static_cast<float>(cJSON_GetArrayItem(rotation, 3)->valuedouble);
+                }
+                // scale
+                cJSON *scale = cJSON_GetObjectItemCaseSensitive(node, "scale");
+                if (cJSON_IsArray(scale) && cJSON_GetArraySize(scale) == 3)
+                {
+                    result.scale.x = static_cast<float>(cJSON_GetArrayItem(scale, 0)->valuedouble);
+                    result.scale.y = static_cast<float>(cJSON_GetArrayItem(scale, 1)->valuedouble);
+                    result.scale.z = static_cast<float>(cJSON_GetArrayItem(scale, 2)->valuedouble);
+                }
+
+                nodes_.push_back(std::move(result));
+            }
+            return true;
+        }
+
+        bool ParseScenes(cJSON *root)
+        {
+            cJSON *scene = cJSON_GetObjectItemCaseSensitive(root, "scene");
+            if (cJSON_IsNumber(scene))
+            {
+                default_scene_ = scene->valueint;
+            }
+
+            cJSON *scenes = cJSON_GetObjectItemCaseSensitive(root, "scenes");
+            if (cJSON_IsArray(scenes))
+            {
+                scenes_.clear();
+                scenes_.reserve(cJSON_GetArraySize(scenes));
+
+                scene = nullptr;
+                cJSON_ArrayForEach(scene, scenes)
+                {
+                    Scene result{};
+
+                    cJSON *name = cJSON_GetObjectItemCaseSensitive(scene, "name");
+                    if (cJSON_IsString(name))
+                    {
+                        result.name = name->valuestring;
+                    }
+
+                    cJSON *nodes = cJSON_GetObjectItemCaseSensitive(scene, "nodes");
+                    if (cJSON_IsArray(nodes))
+                    {
+                        cJSON *node = nullptr;
+                        cJSON_ArrayForEach(node, nodes)
+                        {
+                            if (cJSON_IsNumber(node))
+                            {
+                                result.nodes.push_back(node->valueint);
+                            }
+                        }
+                    }
+                    scenes_.push_back(std::move(result));
+                }
             }
             return true;
         }
@@ -864,7 +1047,9 @@ namespace okara::gltf
             return accessor.count / 3;
         }
 
-        void populatePrimitiveData(Primitive &primitive)
+        /// @brief Reads vertices from binary data and copies them over to library's local data structures.
+        /// @param primitive One sub-mesh.
+        void PopulatePrimitiveData(Primitive &primitive)
         {
             const Accessor &position_accessor = accessors_[primitive.position_accessor];
             primitive.vertices.reserve(position_accessor.count);
@@ -882,7 +1067,9 @@ namespace okara::gltf
             assert(primitive.indices.size() % 3 == 0);
         }
 
-        void extractImageData(Image &image)
+        /// @brief Using the buffer view index read the region of bytes where our image data is stored.
+        /// @param image Struct containing buffer view index.
+        void ExtractImageData(Image &image)
         {
             assert(image.buffer_view >= 0);
 
@@ -892,6 +1079,16 @@ namespace okara::gltf
             image.data.assign(binary_data_.begin() + view.byte_offset, binary_data_.begin() + view.byte_offset + view.byte_length);
         }
 
+        void TraverseNode(int index)
+        {
+            const Node &node = nodes_[index];
+            std::print("Visiting node {}\n", index);
+            for (int child : node.children)
+            {
+                TraverseNode(child);
+            }
+        }
+
     public:
         Header header_{};
         std::vector<std::byte> binary_data_;
@@ -899,6 +1096,9 @@ namespace okara::gltf
         std::vector<Accessor> accessors_;
 
         std::vector<Mesh> meshes_;
+        std::vector<Node> nodes_;
+        std::vector<Scene> scenes_;
+        int default_scene_{-1};
 
         std::vector<Material> materials_;
         std::vector<Texture> textures_;

@@ -5,6 +5,6 @@
 int main()
 {
     okara::gltf::Loader loader{};
-    loader.load("../../models/skull.glb");
+    loader.LoadScene("../../models/skull.glb");
     return EXIT_SUCCESS;
 }
