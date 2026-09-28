@@ -8,7 +8,7 @@
 #include "cJSON.h"
 
 // TODO: implement get failure reason function for this library
-// TODO: make function name start with a a capital letter
+// TODO: make function names start with a a capital letter
 
 namespace okara::gltf
 {
@@ -19,68 +19,52 @@ namespace okara::gltf
 
     struct Header
     {
-        uint32_t magic{};
-        uint32_t version{};
-        uint32_t length{};
+        std::uint32_t magic{};
+        std::uint32_t version{};
+        std::uint32_t length{};
     };
 
     struct ChunkHeader
     {
-        uint32_t length{};
-        uint32_t type{};
+        std::uint32_t length{};
+        std::uint32_t type{};
     };
 
-    // TODO: these should be std::size_t
     struct BufferView
     {
-        int buffer{};
-        int byte_offset{};
-        int byte_length{};
-        int byte_stride{};
+        std::int32_t buffer{-1};      // index into buffer array
+        std::size_t byte_offset{0};   // byte offset into buffer
+        std::size_t byte_length{0};   // length of buffer view in bytes
+        std::uint32_t byte_stride{0}; // stride between elements
     };
-    // TODO: these should be std::size_t
+
     struct Accessor
     {
-        int buffer_view{};
-        int byte_offset{};
-        int component_type{};
-        int count{};
-        std::string type{};
+        std::int32_t buffer_view{-1};  // index into buffer view array
+        std::size_t byte_offset{0};    // byte offset relative to buffer view
+        std::int32_t component_type{}; // float (5126), unsigned short (5123)
+        std::size_t count{};           // number of elements in accessor
+        std::string type{};            // "SCALAR", "VEC2", "VEC3", "VEC4", "MAT2", "MAT3", "MAT4"
     };
 
-    struct Vec4
-    {
-        float x{};
-        float y{};
-        float z{};
-        float w{};
-    };
-
-    struct Vec3
-    {
-        float x{};
-        float y{};
-        float z{};
-    };
-
-    struct Vec2
-    {
-        float x{};
-        float y{};
-    };
-
+#pragma pack(push, 1)
     struct Vertex
     {
-        Vec4 tangent{};
-        Vec3 position{};
-        Vec3 normal{};
-        Vec2 uv{};
+        float position[3]{0.0f, 0.0f, 0.0f};
+        float normal[3]{0.0f, 0.0f, 0.0f};
+        float tangent[4]{0.0f, 0.0f, 0.0f, 1.0f};
+        float uv0[2]{0.0f, 0.0f};
+        float uv1[2]{0.0f, 0.0f};
+        float color0[4]{1.0f, 1.0f, 1.0f, 1.0f};
+        float joints0[4]{0.0f, 0.0f, 0.0f, 0.0f};
+        float weights0[4]{0.0f, 0.0f, 0.0f, 0.0f};
     };
+#pragma pack(pop)
 
     struct Material
     {
         std::string name{};
-        Vec4 base_color_factor{1.0f, 1.0f, 1.0f, 1.0f};
+        float base_color_factor[4]{1.0f, 1.0f, 1.0f, 1.0f};
         float metallic_factor{1.0f};
         float roughness_factor{1.0f};
         int base_color_texture{-1};
@@ -116,13 +100,19 @@ namespace okara::gltf
         std::vector<Vertex> vertices;
         std::vector<uint32_t> indices;
 
-        std::size_t position_accessor{};
-        std::size_t normal_accessor{};
-        std::size_t texcoord_accessor{};
-        std::size_t tangent_accessor{};
-        std::size_t index_accessor{};
+        std::int32_t position_accessor{-1};
+        std::int32_t normal_accessor{-1};
+        std::int32_t tangent_accessor{-1};
+        std::int32_t texcoord0_accessor{-1};
+        std::int32_t texcoord1_accessor{-1};
+        std::int32_t color0_accessor{-1};
+        std::int32_t joints0_accessor{-1};
+        std::int32_t weights0_accessor{-1};
 
-        std::size_t material{};
+        // Index Buffer Accessor (-1 for non-indexed geometry)
+        std::int32_t index_accessor{-1};
+
+        std::int32_t material{-1};
         PrimitiveRenderMode mode{PrimitiveRenderMode::kTriangles};
     };
 
@@ -135,9 +125,9 @@ namespace okara::gltf
     {
         std::vector<int> children;
 
-        Vec4 rotation{0.0f, 0.0f, 0.0f, 1.0f};
-        Vec3 translation{0.0f, 0.0f, 0.0f};
-        Vec3 scale{1.0f, 1.0f, 1.0f};
+        float rotation[4]{0.0f, 0.0f, 0.0f, 1.0f};
+        float translation[3]{0.0f, 0.0f, 0.0f};
+        float scale[3]{1.0f, 1.0f, 1.0f};
 
         int mesh{-1};
     };
@@ -288,89 +278,76 @@ namespace okara::gltf
             }
 
             // inspect meshes
-            cJSON *meshes = cJSON_GetObjectItemCaseSensitive(root, "meshes");
-            if (!cJSON_IsArray(meshes))
+            cJSON *meshes_json = cJSON_GetObjectItemCaseSensitive(root, "meshes");
+            if (!cJSON_IsArray(meshes_json))
             {
                 std::print("GLB does not contain a valid meshes array.\n");
                 cJSON_Delete(root);
                 return false;
             }
 
-            std::print("Meshes: {}\n", cJSON_GetArraySize(meshes));
-            cJSON *mesh = nullptr;
-            cJSON_ArrayForEach(mesh, meshes)
+            std::print("Meshes: {}\n", cJSON_GetArraySize(meshes_json));
+            cJSON *mesh_json = nullptr;
+            cJSON_ArrayForEach(mesh_json, meshes_json)
             {
                 Mesh mesh_result{};
 
-                cJSON *primitives = cJSON_GetObjectItemCaseSensitive(mesh, "primitives");
-                if (!cJSON_IsArray(primitives))
+                cJSON *primitives_json = cJSON_GetObjectItemCaseSensitive(mesh_json, "primitives");
+                if (!cJSON_IsArray(primitives_json))
                 {
                     std::print("Mesh does not contain a valid primitives array.\n");
                     cJSON_Delete(root);
                     return false;
                 }
-                std::print("Primitives: {}\n", cJSON_GetArraySize(primitives));
-                cJSON *primitive = nullptr;
-                cJSON_ArrayForEach(primitive, primitives)
+                std::print("Primitives: {}\n", cJSON_GetArraySize(primitives_json));
+                cJSON *primitive_json = nullptr;
+                cJSON_ArrayForEach(primitive_json, primitives_json)
                 {
-                    Primitive primitive_result{};
-
-                    cJSON *attributes = cJSON_GetObjectItemCaseSensitive(primitive, "attributes");
+                    cJSON *attributes_json = cJSON_GetObjectItemCaseSensitive(primitive_json, "attributes");
                     // attributes value in glTF is an object not an array
-                    if (!cJSON_IsObject(attributes))
+                    if (!cJSON_IsObject(attributes_json))
                     {
                         std::print("Primitive does not contain valid attributes.\n");
                         cJSON_Delete(root);
                         return false;
                     }
-                    cJSON *attribute = nullptr;
-                    cJSON_ArrayForEach(attribute, attributes)
+
+                    // helper function to get accessor id
+                    auto get_accessor_id = [](cJSON *obj, const char *name) -> std::int32_t
                     {
-                        std::print("Attribute: {} -> Accessor {}\n", attribute->string, attribute->valueint);
-                        // store position accessor index
-                        if (std::strcmp(attribute->string, "POSITION") == 0)
-                        {
-                            primitive_result.position_accessor = static_cast<size_t>(attribute->valueint);
-                        }
-                        // store normal accessor index
-                        else if (std::strcmp(attribute->string, "NORMAL") == 0)
-                        {
-                            primitive_result.normal_accessor = static_cast<size_t>(attribute->valueint);
-                        }
-                        // texture coordinates accessor index
-                        else if (std::strcmp(attribute->string, "TEXCOORD_0") == 0)
-                        {
-                            primitive_result.texcoord_accessor = static_cast<size_t>(attribute->valueint);
-                        }
-                        // tangent accessor index
-                        else if (std::strcmp(attribute->string, "TANGENT") == 0)
-                        {
-                            primitive_result.tangent_accessor = static_cast<size_t>(attribute->valueint);
-                        }
+                        cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, name);
+                        return (cJSON_IsNumber(item) && item->valueint >= 0) ? item->valueint : -1;
+                    };
+
+                    Primitive prim_result{};
+
+                    prim_result.position_accessor = get_accessor_id(attributes_json, "POSITION");
+                    prim_result.normal_accessor = get_accessor_id(attributes_json, "NORMAL");
+                    prim_result.tangent_accessor = get_accessor_id(attributes_json, "TANGENT");
+                    prim_result.texcoord0_accessor = get_accessor_id(attributes_json, "TEXCOORD_0");
+                    prim_result.texcoord1_accessor = get_accessor_id(attributes_json, "TEXCOORD_1");
+                    prim_result.color0_accessor = get_accessor_id(attributes_json, "COLOR_0");
+                    prim_result.joints0_accessor = get_accessor_id(attributes_json, "JOINTS_0");
+                    prim_result.weights0_accessor = get_accessor_id(attributes_json, "WEIGHTS_0");
+
+                    if (prim_result.position_accessor == -1)
+                    {
+                        std::print("Primitive missing required POSITION attribute.\n");
+                        cJSON_Delete(root);
+                        return false;
                     }
 
-                    cJSON *indices = cJSON_GetObjectItemCaseSensitive(primitive, "indices");
-                    if (cJSON_IsNumber(indices))
-                    {
-                        std::print("Indices accessor: {}\n", indices->valueint);
-                        primitive_result.index_accessor = static_cast<size_t>(indices->valueint);
-                    }
+                    cJSON *indices = cJSON_GetObjectItemCaseSensitive(primitive_json, "indices");
+                    prim_result.index_accessor = (cJSON_IsNumber(indices) && indices->valueint >= 0) ? indices->valueint : -1;
 
-                    cJSON *mode = cJSON_GetObjectItemCaseSensitive(primitive, "mode");
-                    if (cJSON_IsNumber(mode))
-                    {
-                        std::print("Primitive mode: {}\n", mode->valueint);
-                        primitive_result.mode = static_cast<PrimitiveRenderMode>(mode->valueint);
-                    }
+                    cJSON *mode = cJSON_GetObjectItemCaseSensitive(primitive_json, "mode");
+                    prim_result.mode = static_cast<PrimitiveRenderMode>((cJSON_IsNumber(mode) && mode->valueint >= 0) ? mode->valueint : 4);
+
                     // this connects a primitive to our materials array
-                    cJSON *material = cJSON_GetObjectItemCaseSensitive(primitive, "material");
-                    if (cJSON_IsNumber(material))
-                    {
-                        std::print("Primitive material index: {}\n", material->valueint);
-                        primitive_result.material = static_cast<size_t>(material->valueint);
-                    }
+                    cJSON *material = cJSON_GetObjectItemCaseSensitive(primitive_json, "material");
+                    prim_result.material = (cJSON_IsNumber(material) && material->valueint >= 0) ? material->valueint : -1;
 
-                    mesh_result.primitives.push_back(std::move(primitive_result));
+                    mesh_result.primitives.push_back(std::move(prim_result));
                 }
 
                 meshes_.push_back(std::move(mesh_result));
@@ -438,11 +415,11 @@ namespace okara::gltf
             std::print("Read {} bytes of binary data.\n", binary_data_.size());
 
             // reads vertices, indices and fills up the mesh structure
-            for (Mesh &m : meshes_)
+            for (Mesh &mesh : meshes_)
             {
-                for (Primitive &p : m.primitives)
+                for (Primitive &prim : mesh.primitives)
                 {
-                    PopulatePrimitiveData(p);
+                    PopulatePrimitiveData(prim);
                 }
             }
 
@@ -472,9 +449,9 @@ namespace okara::gltf
             for (std::size_t i = 0; i < nodes_.size(); ++i)
             {
                 std::print("\tNode: {} -> Mesh {}\n", i, nodes_[i].mesh);
-                std::print("\t\tTranslation: ({}, {}, {})\n", nodes_[i].translation.x, nodes_[i].translation.y, nodes_[i].translation.z);
-                std::print("\t\tRotation: ({}, {}, {})\n", nodes_[i].rotation.x, nodes_[i].rotation.y, nodes_[i].rotation.z, nodes_[i].rotation.w);
-                std::print("\t\tScale: ({}, {}, {})\n", nodes_[i].scale.x, nodes_[i].scale.y, nodes_[i].scale.z);
+                std::print("\t\tTranslation: ({}, {}, {})\n", nodes_[i].translation[0], nodes_[i].translation[1], nodes_[i].translation[2]);
+                std::print("\t\tRotation: ({}, {}, {})\n", nodes_[i].rotation[0], nodes_[i].rotation[1], nodes_[i].rotation[2], nodes_[i].rotation[3]);
+                std::print("\t\tScale: ({}, {}, {})\n", nodes_[i].scale[0], nodes_[i].scale[1], nodes_[i].scale[2]);
 
                 for (int child : nodes_[i].children)
                 {
@@ -570,7 +547,13 @@ namespace okara::gltf
                 const int stride = cJSON_IsNumber(byte_stride) ? byte_stride->valueint : 0;
                 std::print("Buffer: {}, Offset: {}, Length: {}, Stride: {}\n", buffer->valueint, offset, byte_length->valueint, stride);
 
-                buffer_views_.push_back({buffer->valueint, offset, byte_length->valueint, stride});
+                BufferView result{};
+                result.buffer = static_cast<std::uint32_t>(buffer->valueint);
+                result.byte_offset = static_cast<std::size_t>(offset);
+                result.byte_length = static_cast<std::size_t>(byte_length->valueint);
+                result.byte_stride = static_cast<std::uint32_t>(stride);
+
+                buffer_views_.push_back(result);
             }
 
             return true;
@@ -613,7 +596,14 @@ namespace okara::gltf
 
                 std::print("Buffer View: {}, Offset: {}, Component Type: {}, Count: {}, Type: {}\n", view, offset, component_type->valueint, count->valueint, type->valuestring);
 
-                accessors_.push_back({view, offset, component_type->valueint, count->valueint, type->valuestring});
+                Accessor result{};
+                result.buffer_view = static_cast<std::int32_t>(view);
+                result.byte_offset = static_cast<std::size_t>(offset);
+                result.component_type = static_cast<std::int32_t>(component_type->valueint);
+                result.count = static_cast<std::size_t>(count->valueint);
+                result.type = type->valuestring;
+
+                accessors_.push_back(result);
             }
 
             return true;
@@ -683,10 +673,10 @@ namespace okara::gltf
                         // validate that all the data inside color factor is not malformed
                         if (cJSON_IsNumber(r) && cJSON_IsNumber(g) && cJSON_IsNumber(b) && cJSON_IsNumber(a))
                         {
-                            result.base_color_factor.x = static_cast<float>(r->valuedouble);
-                            result.base_color_factor.y = static_cast<float>(g->valuedouble);
-                            result.base_color_factor.z = static_cast<float>(b->valuedouble);
-                            result.base_color_factor.w = static_cast<float>(a->valuedouble);
+                            result.base_color_factor[0] = static_cast<float>(r->valuedouble);
+                            result.base_color_factor[1] = static_cast<float>(g->valuedouble);
+                            result.base_color_factor[2] = static_cast<float>(b->valuedouble);
+                            result.base_color_factor[3] = static_cast<float>(a->valuedouble);
                         }
                     }
                 }
@@ -822,26 +812,26 @@ namespace okara::gltf
                 cJSON *translation = cJSON_GetObjectItemCaseSensitive(node, "translation");
                 if (cJSON_IsArray(translation) && cJSON_GetArraySize(translation) == 3)
                 {
-                    result.translation.x = static_cast<float>(cJSON_GetArrayItem(translation, 0)->valuedouble);
-                    result.translation.y = static_cast<float>(cJSON_GetArrayItem(translation, 1)->valuedouble);
-                    result.translation.z = static_cast<float>(cJSON_GetArrayItem(translation, 2)->valuedouble);
+                    result.translation[0] = static_cast<float>(cJSON_GetArrayItem(translation, 0)->valuedouble);
+                    result.translation[1] = static_cast<float>(cJSON_GetArrayItem(translation, 1)->valuedouble);
+                    result.translation[2] = static_cast<float>(cJSON_GetArrayItem(translation, 2)->valuedouble);
                 }
                 // rotation
                 cJSON *rotation = cJSON_GetObjectItemCaseSensitive(node, "rotation");
                 if (cJSON_IsArray(rotation) && cJSON_GetArraySize(rotation) == 4)
                 {
-                    result.rotation.x = static_cast<float>(cJSON_GetArrayItem(rotation, 0)->valuedouble);
-                    result.rotation.y = static_cast<float>(cJSON_GetArrayItem(rotation, 1)->valuedouble);
-                    result.rotation.z = static_cast<float>(cJSON_GetArrayItem(rotation, 2)->valuedouble);
-                    result.rotation.w = static_cast<float>(cJSON_GetArrayItem(rotation, 3)->valuedouble);
+                    result.rotation[0] = static_cast<float>(cJSON_GetArrayItem(rotation, 0)->valuedouble);
+                    result.rotation[1] = static_cast<float>(cJSON_GetArrayItem(rotation, 1)->valuedouble);
+                    result.rotation[2] = static_cast<float>(cJSON_GetArrayItem(rotation, 2)->valuedouble);
+                    result.rotation[3] = static_cast<float>(cJSON_GetArrayItem(rotation, 3)->valuedouble);
                 }
                 // scale
                 cJSON *scale = cJSON_GetObjectItemCaseSensitive(node, "scale");
                 if (cJSON_IsArray(scale) && cJSON_GetArraySize(scale) == 3)
                 {
-                    result.scale.x = static_cast<float>(cJSON_GetArrayItem(scale, 0)->valuedouble);
-                    result.scale.y = static_cast<float>(cJSON_GetArrayItem(scale, 1)->valuedouble);
-                    result.scale.z = static_cast<float>(cJSON_GetArrayItem(scale, 2)->valuedouble);
+                    result.scale[0] = static_cast<float>(cJSON_GetArrayItem(scale, 0)->valuedouble);
+                    result.scale[1] = static_cast<float>(cJSON_GetArrayItem(scale, 1)->valuedouble);
+                    result.scale[2] = static_cast<float>(cJSON_GetArrayItem(scale, 2)->valuedouble);
                 }
 
                 nodes_.push_back(std::move(result));
@@ -892,179 +882,167 @@ namespace okara::gltf
             return true;
         }
 
-        constexpr size_t componentTypeSize(uint32_t component_type)
+        void CopyVerticesFromBin(Primitive &primitive)
         {
-            switch (component_type)
+            if (primitive.position_accessor < 0)
             {
-            case 5120: // BYTE (int8_t)
+                std::print("Position accessor is required by gltf spec.\n");
+                return;
+            }
+
+            const Accessor &pos_accessor = accessors_[primitive.position_accessor];
+            const std::size_t vertex_count = pos_accessor.count;
+
+            // clean up vertices
+            primitive.vertices.clear();
+            primitive.vertices.resize(vertex_count);
+
+            auto read_attribute_floats = [&](int32_t accessor_idx, size_t float_count, auto get_target_ptr)
+            {
+                if (accessor_idx < 0)
+                {
+                    return;
+                }
+
+                const Accessor &acc = accessors_[accessor_idx];
+                const BufferView &view = buffer_views_[acc.buffer_view];
+
+                const std::byte *src_bytes = binary_data_.data() + view.byte_offset + acc.byte_offset;
+
+                const std::size_t element_size = float_count * sizeof(float);
+                const std::size_t stride = (view.byte_stride > 0) ? view.byte_stride : element_size;
+
+                if (stride == element_size)
+                {
+                    // fast path: contiguous data
+                    for (std::size_t i = 0; i < vertex_count; ++i)
+                    {
+                        std::memcpy(get_target_ptr(primitive.vertices[i]), src_bytes + (i * element_size), element_size);
+                    }
+                }
+                else
+                {
+                    // slow path: strided interleaved data
+                    for (std::size_t i = 0; i < vertex_count; ++i)
+                    {
+                        std::memcpy(get_target_ptr(primitive.vertices[i]), src_bytes + (i * stride), element_size);
+                    }
+                }
+            };
+
+            // decode each attribute across all vertices at once
+            // clang-format off
+            read_attribute_floats(primitive.position_accessor, 3, [](Vertex &v) { return v.position; });
+            read_attribute_floats(primitive.normal_accessor, 3, [](Vertex &v) { return v.normal; });
+            read_attribute_floats(primitive.tangent_accessor, 4, [](Vertex &v) { return v.tangent; });
+            read_attribute_floats(primitive.texcoord0_accessor, 2, [](Vertex &v) { return v.uv0; });
+            read_attribute_floats(primitive.texcoord1_accessor, 2, [](Vertex &v) { return v.uv1; });
+            read_attribute_floats(primitive.color0_accessor, 4, [](Vertex &v) { return v.color0; });
+            read_attribute_floats(primitive.joints0_accessor, 4, [](Vertex &v) { return v.joints0; });
+            read_attribute_floats(primitive.weights0_accessor, 4, [](Vertex &v) { return v.weights0; });
+            // clang-format on
+        }
+
+        void CopyIndicesFromBin(Primitive &primitive)
+        {
+            if (primitive.index_accessor < 0)
+            {
+                return;
+            }
+
+            const Accessor &acc = accessors_[primitive.index_accessor];
+            // Safety check on buffer_view
+            if (acc.buffer_view < 0)
+            {
+                return;
+            }
+
+            const BufferView &view = buffer_views_[acc.buffer_view];
+
+            primitive.indices.clear();
+            primitive.indices.resize(acc.count);
+
+            const std::byte *src_bytes = binary_data_.data() + view.byte_offset + acc.byte_offset;
+            const std::size_t stride = view.byte_stride;
+
+            switch (acc.component_type)
+            {
             case 5121: // UNSIGNED_BYTE (uint8_t)
-                return 1;
-
-            case 5122: // SHORT (int16_t)
+            {
+                if (stride == 0 || stride == sizeof(std::uint8_t))
+                {
+                    for (std::size_t i = 0; i < acc.count; ++i)
+                    {
+                        primitive.indices[i] = static_cast<std::uint32_t>(reinterpret_cast<const std::uint8_t *>(src_bytes)[i]);
+                    }
+                }
+                else
+                {
+                    for (std::size_t i = 0; i < acc.count; ++i)
+                    {
+                        const auto *ptr = reinterpret_cast<const std::uint8_t *>(src_bytes + (i * stride));
+                        primitive.indices[i] = static_cast<std::uint32_t>(*ptr);
+                    }
+                }
+                break;
+            }
             case 5123: // UNSIGNED_SHORT (uint16_t)
-                return 2;
-
+            {
+                if (stride == 0 || stride == sizeof(std::uint16_t))
+                {
+                    const auto *src16 = reinterpret_cast<const std::uint16_t *>(src_bytes);
+                    for (std::size_t i = 0; i < acc.count; ++i)
+                    {
+                        primitive.indices[i] = static_cast<std::uint32_t>(src16[i]);
+                    }
+                }
+                else
+                {
+                    for (std::size_t i = 0; i < acc.count; ++i)
+                    {
+                        const auto *ptr = reinterpret_cast<const std::uint16_t *>(src_bytes + (i * stride));
+                        primitive.indices[i] = static_cast<std::uint32_t>(*ptr);
+                    }
+                }
+                break;
+            }
             case 5125: // UNSIGNED_INT (uint32_t)
-            case 5126: // FLOAT (float)
-                return 4;
-
-            default:
-                return 0;
-            }
-        }
-
-        size_t componentCount(const std::string &type)
-        {
-            if (type == "SCALAR")
-                return 1;
-            if (type == "VEC2")
-                return 2;
-            if (type == "VEC3")
-                return 3;
-            if (type == "VEC4")
-                return 4;
-
-            return 0;
-        }
-
-        size_t calculateOffset(const Accessor &accessor, size_t index)
-        {
-            assert(index < accessor.count);
-            const std::size_t component_size = componentTypeSize(accessor.component_type);
-            const std::size_t component_count = componentCount(accessor.type);
-            const std::size_t element_size = component_size * component_count;
-            const BufferView &view = buffer_views_[accessor.buffer_view];
-            const size_t view_offset = view.byte_offset + accessor.byte_offset;
-
-            const size_t stride = view.byte_stride != 0 ? view.byte_stride : element_size;
-            return view_offset + index * stride;
-        }
-
-        // TODO: possible optimization of memcpy functions by doing one call
-
-        Vec4 readVec4(const Accessor &accessor, size_t index)
-        {
-            Vec4 result{};
-            const size_t offset = calculateOffset(accessor, index);
-            std::memcpy(&result.x, binary_data_.data() + offset + 0, sizeof(float));
-            std::memcpy(&result.y, binary_data_.data() + offset + 4, sizeof(float));
-            std::memcpy(&result.z, binary_data_.data() + offset + 8, sizeof(float));
-            std::memcpy(&result.w, binary_data_.data() + offset + 12, sizeof(float));
-
-            return result;
-        }
-
-        Vec3 readVec3(const Accessor &accessor, size_t index)
-        {
-
-            Vec3 result{};
-            const size_t offset = calculateOffset(accessor, index);
-            std::memcpy(&result.x, binary_data_.data() + offset + 0, sizeof(float));
-            std::memcpy(&result.y, binary_data_.data() + offset + 4, sizeof(float));
-            std::memcpy(&result.z, binary_data_.data() + offset + 8, sizeof(float));
-
-            return result;
-        }
-
-        Vec2 readVec2(const Accessor &accessor, size_t index)
-        {
-            Vec2 result{};
-            const size_t offset = calculateOffset(accessor, index);
-            std::memcpy(&result.x, binary_data_.data() + offset + 0, sizeof(float));
-            std::memcpy(&result.y, binary_data_.data() + offset + 4, sizeof(float));
-
-            return result;
-        }
-
-        Vec3 readPosition(const Accessor &accessor, std::size_t index)
-        {
-            return readVec3(accessor, index);
-        }
-
-        Vec3 readNormal(const Accessor &accessor, std::size_t index)
-        {
-            return readVec3(accessor, index);
-        }
-
-        Vec2 readTexcoord(const Accessor &accessor, std::size_t index)
-        {
-            return readVec2(accessor, index);
-        }
-
-        Vec4 readTangent(const Accessor &accessor, std::size_t index)
-        {
-            return readVec4(accessor, index);
-        }
-
-        uint32_t readIndex(const Accessor &accessor, std::size_t index)
-        {
-            const size_t offset = calculateOffset(accessor, index);
-
-            switch (accessor.component_type)
             {
-            case 5121: // unsigned byte
-            {
-                uint8_t v{};
-                std::memcpy(&v, binary_data_.data() + offset, sizeof(uint8_t));
-                return v;
-            }
-            case 5123: // unsigned short
-            {
-                uint16_t v{};
-                std::memcpy(&v, binary_data_.data() + offset, sizeof(uint16_t));
-                return v;
-            }
-            case 5125: // unsigned int
-            {
-                uint32_t v{};
-                std::memcpy(&v, binary_data_.data() + offset, sizeof(uint32_t));
-                return v;
+                if (stride == 0 || stride == sizeof(std::uint32_t))
+                {
+                    // FASTEST PATH: Directly copy contiguous 32-bit uint block
+                    std::memcpy(primitive.indices.data(), src_bytes, acc.count * sizeof(std::uint32_t));
+                }
+                else
+                {
+                    for (std::size_t i = 0; i < acc.count; ++i)
+                    {
+                        std::memcpy(&primitive.indices[i], src_bytes + (i * stride), sizeof(std::uint32_t));
+                    }
+                }
+                break;
             }
             default:
+            {
+                std::print("Unsupported index component type: {}\n", acc.component_type);
                 assert(false && "Unsupported index component type");
-                return 0;
+                break;
+            }
             }
 
-            assert(false && "Unsupported index component type");
-            return 0;
-        }
-
-        Vertex readVertex(const Primitive &primitive, std::size_t index)
-        {
-            Vertex result{};
-
-            result.position = readPosition(accessors_[primitive.position_accessor], index);
-            result.normal = readNormal(accessors_[primitive.normal_accessor], index);
-            result.uv = readTexcoord(accessors_[primitive.texcoord_accessor], index);
-            result.tangent = readTangent(accessors_[primitive.tangent_accessor], index);
-
-            return result;
-        }
-
-        std::size_t triangleCount(const Accessor &accessor) const
-        {
-            assert(accessor.count % 3 == 0);
-            return accessor.count / 3;
+            // Assertion only applies if rendering mode is TRIANGLES
+            if (primitive.mode == PrimitiveRenderMode::kTriangles)
+            {
+                assert(primitive.indices.size() % 3 == 0);
+            }
         }
 
         /// @brief Reads vertices from binary data and copies them over to library's local data structures.
         /// @param primitive One sub-mesh.
         void PopulatePrimitiveData(Primitive &primitive)
         {
-            const Accessor &position_accessor = accessors_[primitive.position_accessor];
-            primitive.vertices.reserve(position_accessor.count);
-            for (size_t i = 0; i < position_accessor.count; ++i)
-            {
-                primitive.vertices.push_back(readVertex(primitive, i));
-            }
-
-            const Accessor &index_accessor = accessors_[primitive.index_accessor];
-            primitive.indices.reserve(index_accessor.count);
-            for (size_t i = 0; i < index_accessor.count; ++i)
-            {
-                primitive.indices.push_back(readIndex(index_accessor, i));
-            }
-            assert(primitive.indices.size() % 3 == 0);
+            CopyVerticesFromBin(primitive);
+            CopyIndicesFromBin(primitive);
         }
 
         /// @brief Using the buffer view index read the region of bytes where our image data is stored.
