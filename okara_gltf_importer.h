@@ -1,6 +1,7 @@
 #include <print>
 #include <string>
 #include <fstream>
+#include <array>
 #include <vector>
 #include <cstddef>
 #include <cassert>
@@ -9,13 +10,67 @@
 
 // TODO: implement get failure reason function for this library
 // TODO: add GlTF support
+// TODO: read values as double to support larger scenes
+// TODO: make copy binary data into a function
 
 namespace okara::gltf
 {
+    using Matrix4x4 = std::array<float, 16>;
+
     static constexpr std::uint32_t GLB_MAGIC = 0x46546C67;
     static constexpr std::uint32_t GLB_VERSION = 2;
     static constexpr std::uint32_t JSON_CHUNK = 0x4E4F534A;
     static constexpr std::uint32_t BIN_CHUNK = 0x004E4942;
+    // clang-format off
+    static constexpr Matrix4x4 IDENTITY_MATRIX = {
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1,
+    };
+    // clang-format on
+
+    static inline Matrix4x4 Multiply(const Matrix4x4 &a, const Matrix4x4 &b)
+    {
+        Matrix4x4 result{};
+        for (int col = 0; col < 4; ++col)
+            for (int row = 0; row < 4; ++row)
+            {
+                float sum = 0.0f;
+                for (int k = 0; k < 4; ++k)
+                {
+                    sum += a[k * 4 + row] * b[col * 4 + k];
+                }
+                result[col * 4 + row] = sum;
+            }
+        return result;
+    }
+
+    static inline Matrix4x4 ComposeTranslationRotationScale(const std::array<float, 3> &t, const std::array<float, 4> &q, const std::array<float, 3> &s)
+    {
+        const float x = q[0], y = q[1], z = q[2], w = q[3];
+        Matrix4x4 m = IDENTITY_MATRIX;
+
+        // rotation columns, each scaled by the matching scale component
+        m[0] = (1 - 2 * (y * y + z * z)) * s[0];
+        m[1] = (2 * (x * y + z * w)) * s[0];
+        m[2] = (2 * (x * z - y * w)) * s[0];
+
+        m[4] = (2 * (x * y - z * w)) * s[1];
+        m[5] = (1 - 2 * (x * x + z * z)) * s[1];
+        m[6] = (2 * (y * z + x * w)) * s[1];
+
+        m[8] = (2 * (x * z + y * w)) * s[2];
+        m[9] = (2 * (y * z - x * w)) * s[2];
+        m[10] = (1 - 2 * (x * x + y * y)) * s[2];
+
+        // translation
+        m[12] = t[0];
+        m[13] = t[1];
+        m[14] = t[2];
+
+        return m;
+    }
 
     struct Header
     {
@@ -140,18 +195,29 @@ namespace okara::gltf
         PrimitiveRenderMode mode{PrimitiveRenderMode::kTriangles};
     };
 
+    /// @brief Unique mesh containing a set of renderable primitives, think of this as raw untransformed geometry
     struct Mesh
     {
         std::vector<Primitive> primitives;
+    };
+
+    /// @brief An instance that references to a mesh and has a transform which is inherited via its node hierarchy
+    struct MeshInstance
+    {
+        std::int32_t mesh{-1};
+        Matrix4x4 world_transform{IDENTITY_MATRIX};
     };
 
     struct Node
     {
         std::vector<int> children;
 
-        float rotation[4]{0.0f, 0.0f, 0.0f, 1.0f};
-        float translation[3]{0.0f, 0.0f, 0.0f};
-        float scale[3]{1.0f, 1.0f, 1.0f};
+        std::array<float, 4> rotation{0.0f, 0.0f, 0.0f, 1.0f};
+        std::array<float, 3> translation{0.0f, 0.0f, 0.0f};
+        std::array<float, 3> scale{1.0f, 1.0f, 1.0f};
+
+        bool has_matrix{false};
+        Matrix4x4 matrix = IDENTITY_MATRIX;
 
         int mesh{-1};
     };
@@ -302,79 +368,10 @@ namespace okara::gltf
             }
 
             // inspect meshes
-            cJSON *meshes_json = cJSON_GetObjectItemCaseSensitive(root, "meshes");
-            if (!cJSON_IsArray(meshes_json))
+            if (!ParseMeshes(root))
             {
-                std::print("GLB does not contain a valid meshes array.\n");
                 cJSON_Delete(root);
                 return false;
-            }
-
-            std::print("Meshes: {}\n", cJSON_GetArraySize(meshes_json));
-            cJSON *mesh_json = nullptr;
-            cJSON_ArrayForEach(mesh_json, meshes_json)
-            {
-                Mesh mesh_result{};
-
-                cJSON *primitives_json = cJSON_GetObjectItemCaseSensitive(mesh_json, "primitives");
-                if (!cJSON_IsArray(primitives_json))
-                {
-                    std::print("Mesh does not contain a valid primitives array.\n");
-                    cJSON_Delete(root);
-                    return false;
-                }
-                std::print("Primitives: {}\n", cJSON_GetArraySize(primitives_json));
-                cJSON *primitive_json = nullptr;
-                cJSON_ArrayForEach(primitive_json, primitives_json)
-                {
-                    cJSON *attributes_json = cJSON_GetObjectItemCaseSensitive(primitive_json, "attributes");
-                    // attributes value in glTF is an object not an array
-                    if (!cJSON_IsObject(attributes_json))
-                    {
-                        std::print("Primitive does not contain valid attributes.\n");
-                        cJSON_Delete(root);
-                        return false;
-                    }
-
-                    // helper function to get accessor id
-                    auto get_accessor_id = [](cJSON *obj, const char *name) -> std::int32_t
-                    {
-                        cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, name);
-                        return (cJSON_IsNumber(item) && item->valueint >= 0) ? item->valueint : -1;
-                    };
-
-                    Primitive prim_result{};
-
-                    prim_result.position_accessor = get_accessor_id(attributes_json, "POSITION");
-                    prim_result.normal_accessor = get_accessor_id(attributes_json, "NORMAL");
-                    prim_result.tangent_accessor = get_accessor_id(attributes_json, "TANGENT");
-                    prim_result.texcoord0_accessor = get_accessor_id(attributes_json, "TEXCOORD_0");
-                    prim_result.texcoord1_accessor = get_accessor_id(attributes_json, "TEXCOORD_1");
-                    prim_result.color0_accessor = get_accessor_id(attributes_json, "COLOR_0");
-                    prim_result.joints0_accessor = get_accessor_id(attributes_json, "JOINTS_0");
-                    prim_result.weights0_accessor = get_accessor_id(attributes_json, "WEIGHTS_0");
-
-                    if (prim_result.position_accessor == -1)
-                    {
-                        std::print("Primitive missing required POSITION attribute.\n");
-                        cJSON_Delete(root);
-                        return false;
-                    }
-
-                    cJSON *indices = cJSON_GetObjectItemCaseSensitive(primitive_json, "indices");
-                    prim_result.index_accessor = (cJSON_IsNumber(indices) && indices->valueint >= 0) ? indices->valueint : -1;
-
-                    cJSON *mode = cJSON_GetObjectItemCaseSensitive(primitive_json, "mode");
-                    prim_result.mode = static_cast<PrimitiveRenderMode>((cJSON_IsNumber(mode) && mode->valueint >= 0) ? mode->valueint : 4);
-
-                    // this connects a primitive to our materials array
-                    cJSON *material = cJSON_GetObjectItemCaseSensitive(primitive_json, "material");
-                    prim_result.material = (cJSON_IsNumber(material) && material->valueint >= 0) ? material->valueint : -1;
-
-                    mesh_result.primitives.push_back(std::move(prim_result));
-                }
-
-                meshes_.push_back(std::move(mesh_result));
             }
 
             // nodes
@@ -462,53 +459,32 @@ namespace okara::gltf
                 }
             }
 
-            // NOTE: print the mesh data
-            std::print("Default scene: {}\n", default_scene_);
-            for (std::size_t i = 0; i < scenes_.size(); ++i)
+            // traverse
+            mesh_instances_.clear();
+            const Scene &scene = scenes_[default_scene_];
+            for (const auto node : scene.nodes)
             {
-                const Scene &scene = scenes_[i];
-                std::print("Scene: {} -> {}\n", i, scene.name);
-                for (int node : scene.nodes)
-                {
-                    std::print("\tRoot node: {}\n", node);
-                }
-            }
-            TraverseNode(scenes_[default_scene_].nodes[0]);
-
-            std::print("Nodes: {}\n", nodes_.size());
-            for (std::size_t i = 0; i < nodes_.size(); ++i)
-            {
-                std::print("\tNode: {} -> Mesh {}\n", i, nodes_[i].mesh);
-                std::print("\t\tTranslation: ({}, {}, {})\n", nodes_[i].translation[0], nodes_[i].translation[1], nodes_[i].translation[2]);
-                std::print("\t\tRotation: ({}, {}, {})\n", nodes_[i].rotation[0], nodes_[i].rotation[1], nodes_[i].rotation[2], nodes_[i].rotation[3]);
-                std::print("\t\tScale: ({}, {}, {})\n", nodes_[i].scale[0], nodes_[i].scale[1], nodes_[i].scale[2]);
-
-                for (int child : nodes_[i].children)
-                {
-                    std::print("\t\tChild: {}\n", child);
-                }
-            }
-            std::print("Meshes: {}\n", meshes_.size());
-            size_t mesh_count = 0;
-            for (const Mesh &m : meshes_)
-            {
-                std::print("\tMesh: {}\n", mesh_count);
-                size_t primitive_count = 0;
-                for (const Primitive &p : m.primitives)
-                {
-                    std::print("\t\tPrimitive: {}\n", primitive_count);
-                    std::print("\t\t\tvertices: {}\n", p.vertices.size());
-                    std::print("\t\t\tindices: {}\n", p.indices.size());
-                    std::print("\t\t\tmaterial: {}\n", p.material);
-                    ++primitive_count;
-                }
-                ++mesh_count;
+                TraverseNode(node, IDENTITY_MATRIX);
             }
 
-            std::print("Materials: {}\n", materials_.size());
-            std::print("Textures: {}\n", textures_.size());
-            std::print("Images: {}\n", images_.size());
+            // NOTE: print mesh data
+            for (const MeshInstance &instance : mesh_instances_)
+            {
+                const Mesh &mesh = meshes_[instance.mesh];
 
+                std::print("Instance -> Mesh {}\n", instance.mesh);
+                std::print("\tPrimitives: {}\n", mesh.primitives.size());
+
+                for (std::size_t i = 0; i < mesh.primitives.size(); ++i)
+                {
+                    const Primitive &primitive = mesh.primitives[i];
+
+                    std::print("\t\tPrimitive {}\n", i);
+                    std::print("\t\t\tVertices: {}\n", primitive.vertices.size());
+                    std::print("\t\t\tIndices: {}\n", primitive.indices.size());
+                    std::print("\t\t\tMaterial: {}\n", primitive.material);
+                }
+            }
 
             // release the temperory data
             binary_data_.clear();
@@ -641,6 +617,84 @@ namespace okara::gltf
                 accessors_.push_back(result);
             }
 
+            return true;
+        }
+
+        /// @brief
+        /// @param root
+        /// @return
+        bool ParseMeshes(cJSON *root)
+        {
+            cJSON *meshes_json = cJSON_GetObjectItemCaseSensitive(root, "meshes");
+            if (!cJSON_IsArray(meshes_json))
+            {
+                std::print("GLB does not contain a valid meshes array.\n");
+                return false;
+            }
+
+            std::print("Meshes: {}\n", cJSON_GetArraySize(meshes_json));
+            cJSON *mesh_json = nullptr;
+            cJSON_ArrayForEach(mesh_json, meshes_json)
+            {
+                Mesh mesh_result{};
+
+                cJSON *primitives_json = cJSON_GetObjectItemCaseSensitive(mesh_json, "primitives");
+                if (!cJSON_IsArray(primitives_json))
+                {
+                    std::print("Mesh does not contain a valid primitives array.\n");
+                    return false;
+                }
+                std::print("Primitives: {}\n", cJSON_GetArraySize(primitives_json));
+                cJSON *primitive_json = nullptr;
+                cJSON_ArrayForEach(primitive_json, primitives_json)
+                {
+                    cJSON *attributes_json = cJSON_GetObjectItemCaseSensitive(primitive_json, "attributes");
+                    // attributes value in glTF is an object not an array
+                    if (!cJSON_IsObject(attributes_json))
+                    {
+                        std::print("Primitive does not contain valid attributes.\n");
+                        return false;
+                    }
+
+                    // helper function to get accessor id
+                    auto get_accessor_id = [](cJSON *obj, const char *name) -> std::int32_t
+                    {
+                        cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, name);
+                        return (cJSON_IsNumber(item) && item->valueint >= 0) ? item->valueint : -1;
+                    };
+
+                    Primitive prim_result{};
+
+                    prim_result.position_accessor = get_accessor_id(attributes_json, "POSITION");
+                    prim_result.normal_accessor = get_accessor_id(attributes_json, "NORMAL");
+                    prim_result.tangent_accessor = get_accessor_id(attributes_json, "TANGENT");
+                    prim_result.texcoord0_accessor = get_accessor_id(attributes_json, "TEXCOORD_0");
+                    prim_result.texcoord1_accessor = get_accessor_id(attributes_json, "TEXCOORD_1");
+                    prim_result.color0_accessor = get_accessor_id(attributes_json, "COLOR_0");
+                    prim_result.joints0_accessor = get_accessor_id(attributes_json, "JOINTS_0");
+                    prim_result.weights0_accessor = get_accessor_id(attributes_json, "WEIGHTS_0");
+
+                    if (prim_result.position_accessor == -1)
+                    {
+                        std::print("Primitive missing required POSITION attribute.\n");
+                        return false;
+                    }
+
+                    cJSON *indices = cJSON_GetObjectItemCaseSensitive(primitive_json, "indices");
+                    prim_result.index_accessor = (cJSON_IsNumber(indices) && indices->valueint >= 0) ? indices->valueint : -1;
+
+                    cJSON *mode = cJSON_GetObjectItemCaseSensitive(primitive_json, "mode");
+                    prim_result.mode = static_cast<PrimitiveRenderMode>((cJSON_IsNumber(mode) && mode->valueint >= 0) ? mode->valueint : 4);
+
+                    // this connects a primitive to our materials array
+                    cJSON *material = cJSON_GetObjectItemCaseSensitive(primitive_json, "material");
+                    prim_result.material = (cJSON_IsNumber(material) && material->valueint >= 0) ? material->valueint : -1;
+
+                    mesh_result.primitives.push_back(std::move(prim_result));
+                }
+
+                meshes_.push_back(std::move(mesh_result));
+            }
             return true;
         }
 
@@ -894,30 +948,30 @@ namespace okara::gltf
 
         bool ParseNodes(cJSON *root)
         {
-            cJSON *nodes = cJSON_GetObjectItemCaseSensitive(root, "nodes");
-            if (!cJSON_IsArray(nodes))
+            cJSON *nodes_json = cJSON_GetObjectItemCaseSensitive(root, "nodes");
+            if (!cJSON_IsArray(nodes_json))
             {
                 std::print("GLB does not contain a valid nodes array.\n");
                 // a GLB can have no nodes, so we return true nevertheless.
                 return true;
             }
-            std::print("Nodes: {}\n", cJSON_GetArraySize(nodes));
+            std::print("Nodes: {}\n", cJSON_GetArraySize(nodes_json));
             nodes_.clear();
-            nodes_.reserve(cJSON_GetArraySize(nodes));
+            nodes_.reserve(cJSON_GetArraySize(nodes_json));
 
-            cJSON *node = nullptr;
-            cJSON_ArrayForEach(node, nodes)
+            cJSON *node_json = nullptr;
+            cJSON_ArrayForEach(node_json, nodes_json)
             {
                 Node result{};
 
                 // mesh reference
-                cJSON *mesh = cJSON_GetObjectItemCaseSensitive(node, "mesh");
+                cJSON *mesh = cJSON_GetObjectItemCaseSensitive(node_json, "mesh");
                 if (cJSON_IsNumber(mesh))
                 {
                     result.mesh = mesh->valueint;
                 }
                 // children index
-                cJSON *children = cJSON_GetObjectItemCaseSensitive(node, "children");
+                cJSON *children = cJSON_GetObjectItemCaseSensitive(node_json, "children");
                 if (cJSON_IsArray(children))
                 {
                     cJSON *child = nullptr;
@@ -930,7 +984,7 @@ namespace okara::gltf
                     }
                 }
                 // translation
-                cJSON *translation = cJSON_GetObjectItemCaseSensitive(node, "translation");
+                cJSON *translation = cJSON_GetObjectItemCaseSensitive(node_json, "translation");
                 if (cJSON_IsArray(translation) && cJSON_GetArraySize(translation) == 3)
                 {
                     result.translation[0] = static_cast<float>(cJSON_GetArrayItem(translation, 0)->valuedouble);
@@ -938,7 +992,7 @@ namespace okara::gltf
                     result.translation[2] = static_cast<float>(cJSON_GetArrayItem(translation, 2)->valuedouble);
                 }
                 // rotation
-                cJSON *rotation = cJSON_GetObjectItemCaseSensitive(node, "rotation");
+                cJSON *rotation = cJSON_GetObjectItemCaseSensitive(node_json, "rotation");
                 if (cJSON_IsArray(rotation) && cJSON_GetArraySize(rotation) == 4)
                 {
                     result.rotation[0] = static_cast<float>(cJSON_GetArrayItem(rotation, 0)->valuedouble);
@@ -947,12 +1001,23 @@ namespace okara::gltf
                     result.rotation[3] = static_cast<float>(cJSON_GetArrayItem(rotation, 3)->valuedouble);
                 }
                 // scale
-                cJSON *scale = cJSON_GetObjectItemCaseSensitive(node, "scale");
+                cJSON *scale = cJSON_GetObjectItemCaseSensitive(node_json, "scale");
                 if (cJSON_IsArray(scale) && cJSON_GetArraySize(scale) == 3)
                 {
                     result.scale[0] = static_cast<float>(cJSON_GetArrayItem(scale, 0)->valuedouble);
                     result.scale[1] = static_cast<float>(cJSON_GetArrayItem(scale, 1)->valuedouble);
                     result.scale[2] = static_cast<float>(cJSON_GetArrayItem(scale, 2)->valuedouble);
+                }
+                // matrix
+                cJSON *matrix_json = cJSON_GetObjectItemCaseSensitive(node_json, "matrix");
+                if (cJSON_IsArray(matrix_json) && cJSON_GetArraySize(matrix_json) == 16)
+                {
+                    result.has_matrix = true;
+
+                    for (std::size_t i = 0; i < 16; ++i)
+                    {
+                        result.matrix[i] = static_cast<float>(cJSON_GetArrayItem(matrix_json, i)->valuedouble);
+                    }
                 }
 
                 nodes_.push_back(std::move(result));
@@ -1187,13 +1252,26 @@ namespace okara::gltf
             std::memcpy(image.data.data(), binary_data_.data() + view.byte_offset, view.byte_length);
         }
 
-        void TraverseNode(int index)
+        void TraverseNode(int index, const Matrix4x4 &parent_transform)
         {
-            const Node &node = nodes_[index];
             std::print("Visiting node {}\n", index);
+
+            const Node &node = nodes_[index];
+            const Matrix4x4 local_transform = node.has_matrix ? node.matrix : ComposeTranslationRotationScale(node.translation, node.rotation, node.scale);
+            const Matrix4x4 world_transform = Multiply(parent_transform, local_transform);
+
+            if (node.mesh >= 0)
+            {
+                MeshInstance instance{};
+                instance.mesh = node.mesh;
+                instance.world_transform = world_transform;
+
+                mesh_instances_.push_back(std::move(instance));
+            }
+
             for (int child : node.children)
             {
-                TraverseNode(child);
+                TraverseNode(child, world_transform);
             }
         }
 
@@ -1204,6 +1282,7 @@ namespace okara::gltf
         std::vector<Accessor> accessors_;
 
         std::vector<Mesh> meshes_;
+        std::vector<MeshInstance> mesh_instances_;
         std::vector<Node> nodes_;
         std::vector<Scene> scenes_;
         int default_scene_{-1};
