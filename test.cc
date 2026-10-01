@@ -5,6 +5,6 @@
 int main()
 {
     okara::gltf::Loader loader{};
-    loader.LoadScene("../../models/skull.glb");
-    return EXIT_SUCCESS;
+    bool success = loader.LoadScene("../../models/bot.glb");
+    return success ? EXIT_SUCCESS : EXIT_FAILURE;
 }

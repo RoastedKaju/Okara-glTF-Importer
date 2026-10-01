@@ -219,13 +219,30 @@ namespace okara::gltf
         bool has_matrix{false};
         Matrix4x4 matrix = IDENTITY_MATRIX;
 
-        int mesh{-1};
+        std::int32_t mesh{-1};
+        std::int32_t skin{-1};
+        std::int32_t parent{-1};
     };
 
     struct Scene
     {
         std::string name;
         std::vector<int> nodes;
+    };
+
+    struct Skin
+    {
+        std::string name{};
+
+        std::int32_t inverse_bind_accessor{-1};
+
+        // optional node that identifies the skeleton root
+        std::int32_t skeleton{-1};
+
+        // node indices representing the joints
+        std::vector<std::int32_t> joints;
+
+        std::vector<Matrix4x4> inverse_bind_matrices;
     };
 
     class Loader
@@ -380,6 +397,12 @@ namespace okara::gltf
                 cJSON_Delete(root);
                 return false;
             }
+            // skins
+            if (!ParseSkins(root))
+            {
+                cJSON_Delete(root);
+                return false;
+            }
             // scenes
             if (!ParseScenes(root))
             {
@@ -456,6 +479,15 @@ namespace okara::gltf
                 if (image.buffer_view >= 0)
                 {
                     CopyImageData(image);
+                }
+            }
+
+            // store inverse bind matrices for each skin
+            for (Skin &skin : skins_)
+            {
+                if (!ReadInverseBindMatrices(skin))
+                {
+                    return false;
                 }
             }
 
@@ -644,7 +676,6 @@ namespace okara::gltf
                     std::print("Mesh does not contain a valid primitives array.\n");
                     return false;
                 }
-                std::print("Primitives: {}\n", cJSON_GetArraySize(primitives_json));
                 cJSON *primitive_json = nullptr;
                 cJSON_ArrayForEach(primitive_json, primitives_json)
                 {
@@ -1019,9 +1050,91 @@ namespace okara::gltf
                         result.matrix[i] = static_cast<float>(cJSON_GetArrayItem(matrix_json, i)->valuedouble);
                     }
                 }
+                // skin
+                cJSON *skin = cJSON_GetObjectItemCaseSensitive(node_json, "skin");
+                if (cJSON_IsNumber(skin))
+                {
+                    result.skin = skin->valueint;
+                }
 
                 nodes_.push_back(std::move(result));
             }
+
+            // build node parents
+            for (std::size_t parent_idx = 0; parent_idx < nodes_.size(); ++parent_idx)
+            {
+                const Node &parent_node = nodes_[parent_idx];
+                for (const auto child_idx : parent_node.children)
+                {
+                    nodes_[child_idx].parent = static_cast<std::int32_t>(parent_idx);
+                }
+            }
+
+            return true;
+        }
+
+        bool ParseSkins(cJSON *root)
+        {
+            cJSON *skins_json = cJSON_GetObjectItemCaseSensitive(root, "skins");
+            if (!cJSON_IsArray(skins_json))
+            {
+                return true;
+            }
+
+            skins_.clear();
+            skins_.reserve(cJSON_GetArraySize(skins_json));
+
+            cJSON *skin_json = nullptr;
+            cJSON_ArrayForEach(skin_json, skins_json)
+            {
+                if (!cJSON_IsObject(skin_json))
+                {
+                    return false;
+                }
+
+                Skin result{};
+
+                // name
+                cJSON *name = cJSON_GetObjectItemCaseSensitive(skin_json, "name");
+                if (cJSON_IsString(name))
+                {
+                    result.name = name->valuestring;
+                }
+                // inverseBindMatrices
+                cJSON *inverse_bind_matrices = cJSON_GetObjectItemCaseSensitive(skin_json, "inverseBindMatrices");
+                if (cJSON_IsNumber(inverse_bind_matrices))
+                {
+                    result.inverse_bind_accessor = inverse_bind_matrices->valueint;
+                }
+                // skeleton
+                cJSON *skeleton = cJSON_GetObjectItemCaseSensitive(skin_json, "skeleton");
+                if (cJSON_IsNumber(skeleton))
+                {
+                    result.skeleton = skeleton->valueint;
+                }
+                // joints
+                cJSON *joints = cJSON_GetObjectItemCaseSensitive(skin_json, "joints");
+                if (!cJSON_IsArray(joints))
+                {
+                    std::printf("skin must contain a joints array\n");
+                    return false;
+                }
+
+                cJSON *joint = nullptr;
+                cJSON_ArrayForEach(joint, joints)
+                {
+                    if (!cJSON_IsNumber(joint))
+                    {
+                        std::printf("skin joint must be a node index\n");
+                        return false;
+                    }
+
+                    result.joints.push_back(joint->valueint);
+                }
+
+                skins_.push_back(std::move(result));
+            }
+
             return true;
         }
 
@@ -1196,7 +1309,7 @@ namespace okara::gltf
             {
                 if (stride == 0 || stride == sizeof(std::uint32_t))
                 {
-                    // FASTEST PATH: Directly copy contiguous 32-bit uint block
+                    // directly copy contiguous 32-bit uint block
                     std::memcpy(primitive.indices.data(), src_bytes, acc.count * sizeof(std::uint32_t));
                 }
                 else
@@ -1254,8 +1367,6 @@ namespace okara::gltf
 
         void TraverseNode(int index, const Matrix4x4 &parent_transform)
         {
-            std::print("Visiting node {}\n", index);
-
             const Node &node = nodes_[index];
             const Matrix4x4 local_transform = node.has_matrix ? node.matrix : ComposeTranslationRotationScale(node.translation, node.rotation, node.scale);
             const Matrix4x4 world_transform = Multiply(parent_transform, local_transform);
@@ -1275,6 +1386,81 @@ namespace okara::gltf
             }
         }
 
+        bool ReadInverseBindMatrices(Skin &skin)
+        {
+            skin.inverse_bind_matrices.clear();
+
+            if (skin.inverse_bind_accessor < 0)
+            {
+                return true;
+            }
+
+            const Accessor &accessor = accessors_.at(static_cast<std::size_t>(skin.inverse_bind_accessor));
+            if (accessor.type != "MAT4")
+            {
+                std::print("Inverse bind matrices accessor must be of type MAT4.\n");
+                return false;
+            }
+            if (accessor.component_type != 5126) // FLOAT
+            {
+                std::print("Inverse bind matrices accessor must have component type FLOAT.\n");
+                return false;
+            }
+
+            if (accessor.buffer_view < 0)
+            {
+                std::print("Inverse bind matrices accessor has no buffer view.\n");
+                return false;
+            }
+
+            const BufferView &buffer_view = buffer_views_.at(static_cast<std::size_t>(accessor.buffer_view));
+            constexpr std::size_t matrix_size = sizeof(float) * 16;
+            const std::size_t offset = buffer_view.byte_offset + accessor.byte_offset;
+            const std::size_t required_size = static_cast<std::size_t>(accessor.count) * matrix_size;
+
+            if (offset + required_size > binary_data_.size())
+            {
+                std::print("Inverse bind matrices exceed binary data bounds.\n");
+                return false;
+            }
+
+            if (accessor.count != skin.joints.size())
+            {
+                std::print("Inverse bind matrix count ({}) does not match joint count ({}).\n", accessor.count, skin.joints.size());
+
+                return false;
+            }
+
+            skin.inverse_bind_matrices.resize(accessor.count);
+            const std::byte *source = binary_data_.data() + offset;
+            std::memcpy(skin.inverse_bind_matrices.data(), source, required_size);
+
+            return true;
+        }
+
+        Matrix4x4 CalculateNodeWorldTransform(std::int32_t node_idx)
+        {
+            const Node &node = nodes_[node_idx];
+
+            Matrix4x4 local;
+
+            if (node.has_matrix)
+            {
+                local = node.matrix;
+            }
+            else
+            {
+                local = ComposeTranslationRotationScale(node.translation, node.rotation, node.scale);
+            }
+
+            if (node.parent < 0)
+            {
+                return local;
+            }
+
+            return Multiply(CalculateNodeWorldTransform(node.parent), local);
+        }
+
     public:
         Header header_{};
         std::vector<std::byte> binary_data_;
@@ -1284,6 +1470,7 @@ namespace okara::gltf
         std::vector<Mesh> meshes_;
         std::vector<MeshInstance> mesh_instances_;
         std::vector<Node> nodes_;
+        std::vector<Skin> skins_;
         std::vector<Scene> scenes_;
         int default_scene_{-1};
 
